@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   BUILTIN_CREATE_SKILL,
+  BUILTIN_WEB_SEARCH_SKILL,
   applySkillsToTurn,
   blankSkillMarkdown,
   injectSkillPrompt,
   isValidSkillName,
   mergeCatalog,
   rankSkills,
+  readSkillBody,
   replaceSlashToken,
   skillNamesInText,
   skillTextParts,
@@ -14,6 +16,11 @@ import {
   slugSkillName,
   type Skill,
 } from "./skills";
+import {
+  WEB_SEARCH_SKILL_BODY,
+  WEB_SEARCH_SKILL_NAME,
+} from "./webSearchSkill";
+import { CREATE_SKILL_BODY } from "./createSkill";
 
 const review: Skill = {
   kind: "file",
@@ -220,6 +227,25 @@ describe("mergeCatalog", () => {
       BUILTIN_CREATE_SKILL,
     );
     expect(catalog.find((s) => s.name === "cursor-only")?.source).toBe("cursor");
+  });
+
+  it("bundles the web-search skill after create-skill", () => {
+    const catalog = mergeCatalog([]);
+    expect(catalog).toContainEqual(BUILTIN_CREATE_SKILL);
+    expect(catalog).toContainEqual(BUILTIN_WEB_SEARCH_SKILL);
+    expect(BUILTIN_WEB_SEARCH_SKILL.invocation).toBe("web-search");
+  });
+});
+
+describe("readSkillBody", () => {
+  it("returns each builtin skill its own body", async () => {
+    await expect(readSkillBody(BUILTIN_CREATE_SKILL)).resolves.toBe(
+      CREATE_SKILL_BODY,
+    );
+    await expect(readSkillBody(BUILTIN_WEB_SEARCH_SKILL)).resolves.toBe(
+      WEB_SEARCH_SKILL_BODY,
+    );
+    expect(WEB_SEARCH_SKILL_BODY).toContain(`name: ${WEB_SEARCH_SKILL_NAME}`);
   });
 });
 

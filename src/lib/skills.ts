@@ -18,6 +18,11 @@ import {
   CREATE_SKILL_DESCRIPTION,
   CREATE_SKILL_NAME,
 } from "./createSkill";
+import {
+  WEB_SEARCH_SKILL_BODY,
+  WEB_SEARCH_SKILL_DESCRIPTION,
+  WEB_SEARCH_SKILL_NAME,
+} from "./webSearchSkill";
 
 export type SkillScope = "project" | "user" | "builtin";
 export type SkillSource =
@@ -69,6 +74,15 @@ export const BUILTIN_CREATE_SKILL: BuiltinSkill = {
   name: CREATE_SKILL_NAME,
   description: CREATE_SKILL_DESCRIPTION,
   invocation: CREATE_SKILL_NAME,
+  scope: "builtin",
+  source: "monocode",
+};
+
+export const BUILTIN_WEB_SEARCH_SKILL: BuiltinSkill = {
+  kind: "builtin",
+  name: WEB_SEARCH_SKILL_NAME,
+  description: WEB_SEARCH_SKILL_DESCRIPTION,
+  invocation: WEB_SEARCH_SKILL_NAME,
   scope: "builtin",
   source: "monocode",
 };
@@ -244,6 +258,7 @@ export function mergeCatalog(discovered: DiscoveredSkill[]): Skill[] {
     if (skill.source === "agents") add(asSkill(skill));
   }
   add(BUILTIN_CREATE_SKILL);
+  add(BUILTIN_WEB_SEARCH_SKILL);
   for (const skill of discovered) {
     if (skill.source !== "agents") add(asSkill(skill));
   }
@@ -460,7 +475,11 @@ export function warmPiSkills(
 export async function readSkillBody(
   skill: FileSkill | BuiltinSkill,
 ): Promise<string> {
-  if (skill.kind === "builtin") return CREATE_SKILL_BODY;
+  if (skill.kind === "builtin") {
+    return skill.name === WEB_SEARCH_SKILL_NAME
+      ? WEB_SEARCH_SKILL_BODY
+      : CREATE_SKILL_BODY;
+  }
   try {
     return await readTextFile(skill.path);
   } catch {
