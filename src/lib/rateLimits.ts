@@ -1,6 +1,6 @@
 import { asRecord } from "./harness/codexProtocol";
 
-export type RateLimitProvider = "claude" | "codex";
+export type RateLimitProvider = "claude" | "codex" | "cmd" | "agy";
 
 export type RateLimitStatus =
   "idle" | "fetching" | "ok" | "error" | "unavailable";
@@ -39,6 +39,7 @@ export type ProviderRateLimits = {
   updatedAt: number;
   error: string | null;
   status: RateLimitStatus;
+  tier?: string | null;
 };
 
 export const SESSION_WINDOW_MINUTES = 300;
@@ -73,14 +74,17 @@ export function shouldFetchProvider(
 export function shouldFetchRateLimits(input: {
   force?: boolean;
   visible: boolean;
-  claude: ProviderRateLimits;
-  codex: ProviderRateLimits;
+  claude?: ProviderRateLimits;
+  codex?: ProviderRateLimits;
+  cmd?: ProviderRateLimits;
+  agy?: ProviderRateLimits;
   now?: number;
 }): boolean {
-  return (
-    shouldFetchProvider(input.claude, input) ||
-    shouldFetchProvider(input.codex, input)
-  );
+  if (input.claude && shouldFetchProvider(input.claude, input)) return true;
+  if (input.codex && shouldFetchProvider(input.codex, input)) return true;
+  if (input.cmd && shouldFetchProvider(input.cmd, input)) return true;
+  if (input.agy && shouldFetchProvider(input.agy, input)) return true;
+  return false;
 }
 
 const WINDOW_DURATION_TOLERANCE_MINUTES = 1;
@@ -278,6 +282,7 @@ export function mapUsageWindow(
 function usedPercentFrom(rec: Record<string, unknown>): number | null {
   const value =
     numberField(rec, "used_percentage") ??
+    numberField(rec, "used_percent") ??
     numberField(rec, "usedPercent") ??
     numberField(rec, "utilization");
   if (value == null) return null;
@@ -299,6 +304,180 @@ export function parseClaudeOAuthUsage(body: string): ProviderRateLimits {
     provider: "claude",
     session: mapUsageWindow(rec.five_hour, SESSION_WINDOW_MINUTES),
     weekly: mapUsageWindow(rec.seven_day, WEEKLY_WINDOW_MINUTES),
+    resetCredits: null,
+    updatedAt: Date.now(),
+    error: null,
+    status: "ok",
+  };
+}
+
+export function mapCmdUsageWindow(
+  raw: unknown,
+  windowMinutes: number,
+): RateLimitWindow | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+
+  let usedPercent: number | null = null;
+  const used = numberField(rec, "used");
+  const cap = numberField(rec, "cap");
+  if (used != null && cap != null && cap > 0) {
+    usedPercent = (used / cap) * 100;
+  } else {
+    usedPercent = usedPercentFrom(rec);
+  }
+  if (usedPercent == null) return null;
+
+  const resetsAt =
+    parseResetTimestamp(rec.resetAt) ??
+    parseResetTimestamp(rec.reset_at) ??
+    parseResetTimestamp(rec.resetsAt) ??
+    parseResetTimestamp(rec.resets_at);
+
+  return {
+    usedPercent: clampUsedPercent(usedPercent),
+    windowMinutes,
+    resetsAt,
+  };
+}
+
+export function parseCmdUsage(body: string): ProviderRateLimits {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return errorRateLimits("cmd", "Command Code usage response was not JSON");
+  }
+  const rec = asRecord(parsed);
+  if (!rec) {
+    return errorRateLimits("cmd", "Command Code usage response was empty");
+  }
+
+  const windowLimits =
+    asRecord(rec.windowLimits) ?? asRecord(rec.window_limits);
+  const fiveHourRaw = windowLimits
+    ? (asRecord(windowLimits.fiveHour) ?? asRecord(windowLimits.five_hour))
+    : asRecord(rec.five_hour);
+  const weeklyRaw = windowLimits
+    ? (asRecord(windowLimits.weekly) ?? asRecord(windowLimits.seven_day))
+    : (asRecord(rec.seven_day) ?? asRecord(rec.weekly));
+
+  const session = mapCmdUsageWindow(fiveHourRaw, SESSION_WINDOW_MINUTES);
+  const weekly = mapCmdUsageWindow(weeklyRaw, WEEKLY_WINDOW_MINUTES);
+
+  return {
+    provider: "cmd",
+    session,
+    weekly,
+    resetCredits: null,
+    updatedAt: Date.now(),
+    error: null,
+    status: "ok",
+  };
+}
+
+export function parseAgyUsage(body: string): ProviderRateLimits {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return errorRateLimits("agy", "Antigravity usage response was not JSON");
+  }
+  const rec = asRecord(parsed);
+  if (!rec) {
+    return errorRateLimits("agy", "Antigravity usage response was empty");
+  }
+
+  const buckets = Array.isArray(rec.buckets) ? rec.buckets : [];
+  let session: RateLimitWindow | null = null;
+  let weekly: RateLimitWindow | null = null;
+
+  for (const item of buckets) {
+    const b = asRecord(item);
+    if (!b) continue;
+    const remainingFraction =
+      numberField(b, "remainingFraction") ??
+      numberField(b, "remaining_fraction");
+    let usedPercent: number | null = null;
+    if (remainingFraction != null) {
+      usedPercent = (1 - remainingFraction) * 100;
+    } else {
+      usedPercent = usedPercentFrom(b);
+    }
+    if (usedPercent == null) continue;
+
+    const resetTime = b.resetTime ?? b.reset_time;
+    let resetsAt: number | null = null;
+    if (
+      typeof resetTime === "object" &&
+      resetTime != null &&
+      "seconds" in resetTime
+    ) {
+      const sec = Number((resetTime as { seconds: unknown }).seconds);
+      resetsAt = Number.isFinite(sec) ? sec * 1000 : null;
+    } else {
+      resetsAt = parseResetTimestamp(resetTime);
+    }
+
+    const windowStr = String(
+      b.window ?? b.windowDuration ?? b.window_duration ?? "",
+    ).toLowerCase();
+    const isFiveHour =
+      windowStr.includes("5h") ||
+      windowStr.includes("18000") ||
+      windowStr.includes("300") ||
+      String(b.bucketId ?? "").toLowerCase().includes("5h") ||
+      String(b.displayName ?? "").toLowerCase().includes("5 hour");
+    const isWeekly =
+      windowStr.includes("7d") ||
+      windowStr.includes("604800") ||
+      windowStr.includes("week") ||
+      windowStr.includes("10080") ||
+      String(b.bucketId ?? "").toLowerCase().includes("week") ||
+      String(b.displayName ?? "").toLowerCase().includes("weekly");
+
+    if (isFiveHour && !session) {
+      session = {
+        usedPercent: clampUsedPercent(usedPercent),
+        windowMinutes: SESSION_WINDOW_MINUTES,
+        resetsAt,
+      };
+    } else if (isWeekly && !weekly) {
+      weekly = {
+        usedPercent: clampUsedPercent(usedPercent),
+        windowMinutes: WEEKLY_WINDOW_MINUTES,
+        resetsAt,
+      };
+    } else if (!session) {
+      session = {
+        usedPercent: clampUsedPercent(usedPercent),
+        windowMinutes: SESSION_WINDOW_MINUTES,
+        resetsAt,
+      };
+    }
+  }
+
+  let tier: string | null = null;
+  const allowedTiers = Array.isArray(rec.allowedTiers) ? rec.allowedTiers : [];
+  for (const item of allowedTiers) {
+    const t = asRecord(item);
+    if (!t) continue;
+    const desc = String(t.description ?? "").toLowerCase();
+    const id = String(t.id ?? "").toLowerCase();
+    if (desc.includes("unlimited") || id.includes("standard")) {
+      tier = "unlimited";
+      break;
+    }
+    if (t.name && typeof t.name === "string" && !tier) {
+      tier = t.name;
+    }
+  }
+
+  return {
+    provider: "agy",
+    session,
+    weekly,
+    tier,
     resetCredits: null,
     updatedAt: Date.now(),
     error: null,

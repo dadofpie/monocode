@@ -13,6 +13,8 @@ const TEXT_HARNESSES: HarnessId[] = [
   "codex",
   "grok",
   "opencode",
+  "cmd",
+  "agy",
 ];
 
 /** Pick the harness used for titles, commit messages, and PR text. */

@@ -306,6 +306,30 @@ pub fn harness_resolve_grok() -> Result<CursorBinary, String> {
         })
 }
 
+/// Resolve the CommandCode CLI (`cmd`).
+#[tauri::command(async)]
+pub fn harness_resolve_cmd() -> Result<CursorBinary, String> {
+    resolve_cmd()
+        .map(|path| CursorBinary {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .ok_or_else(|| {
+            "CommandCode CLI not found. Install it with `npm install -g command-code` and run `cmd login`, then retry.".into()
+        })
+}
+
+/// Resolve the Antigravity CLI (`agy`).
+#[tauri::command(async)]
+pub fn harness_resolve_agy() -> Result<CursorBinary, String> {
+    resolve_agy()
+        .map(|path| CursorBinary {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .ok_or_else(|| {
+            "Antigravity CLI not found. Install `agy` from https://antigravity.google/docs/cli/install/ and sign in, then retry.".into()
+        })
+}
+
 /// Bind an ephemeral loopback port for `opencode serve`.
 #[tauri::command]
 pub fn harness_free_port() -> Result<u16, String> {
@@ -658,6 +682,8 @@ fn is_resolved_harness_binary(command: &str) -> bool {
         resolve_omp(),
         resolve_fx(),
         resolve_grok(),
+        resolve_cmd(),
+        resolve_agy(),
     ]
     .into_iter()
     .flatten()
@@ -1413,6 +1439,36 @@ fn resolve_grok() -> Option<PathBuf> {
     }
 
     first_binary_matching(candidates, is_grok_agent)
+}
+
+fn resolve_named_cli(name: &str) -> Option<PathBuf> {
+    let home = dirs_home().map(PathBuf::from);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(home) = &home {
+        candidates.push(home.join(".local/bin").join(name));
+        candidates.push(home.join(".npm-global/bin").join(name));
+        candidates.push(home.join(".cargo/bin").join(name));
+        candidates.push(home.join("n/bin").join(name));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin").join(name));
+    candidates.push(PathBuf::from("/usr/local/bin").join(name));
+    candidates.push(PathBuf::from("/usr/bin").join(name));
+    candidates.push(PathBuf::from("/snap/bin").join(name));
+    if let Some(from_shell) = which_via_login_shell(name) {
+        candidates.push(from_shell);
+    }
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn resolve_cmd() -> Option<PathBuf> {
+    resolve_named_cli("cmd")
+}
+
+fn resolve_agy() -> Option<PathBuf> {
+    resolve_named_cli("agy")
 }
 
 fn is_pi_coding_agent(path: &Path) -> bool {

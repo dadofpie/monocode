@@ -11,6 +11,11 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 const USER_AGENT: &str = "claude-code/2.1.0";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn http_client() -> &'static ureq::Agent {
+    static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build())
+}
+
 #[cfg(target_os = "macos")]
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -20,12 +25,20 @@ const KEYCHAIN_FALLBACK_USER: &str = "claude-code-user";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClaudeUsageFetch {
+pub struct ProviderUsageFetch {
     pub status: String,
     pub http_status: Option<u16>,
     pub body: Option<String>,
     pub error: Option<String>,
 }
+
+pub type ClaudeUsageFetch = ProviderUsageFetch;
+pub type CmdUsageFetch = ProviderUsageFetch;
+pub type AgyUsageFetch = ProviderUsageFetch;
+
+const CMD_CREDITS_URL: &str = "https://api.commandcode.ai/alpha/billing/credits";
+const AGY_DAILY_CLOUDCODE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
+const AGY_PROD_CLOUDCODE_URL: &str = "https://cloudcode-pa.googleapis.com";
 
 struct ClaudeCredentials {
     access_token: String,
@@ -37,8 +50,8 @@ fn usage_result(
     http_status: Option<u16>,
     body: Option<String>,
     error: Option<String>,
-) -> ClaudeUsageFetch {
-    ClaudeUsageFetch {
+) -> ProviderUsageFetch {
+    ProviderUsageFetch {
         status: status.into(),
         http_status,
         body,
@@ -76,9 +89,223 @@ fn fetch_claude_usage_sync() -> Result<ClaudeUsageFetch, String> {
     Ok(fetch_usage_with_token(&creds.access_token))
 }
 
+/// Fetch Command Code 5-hour / weekly window limits and credits via ~/.commandcode/auth.json.
+#[tauri::command]
+pub async fn fetch_cmd_usage() -> Result<CmdUsageFetch, String> {
+    tauri::async_runtime::spawn_blocking(fetch_cmd_usage_sync)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fetch_cmd_usage_sync() -> Result<CmdUsageFetch, String> {
+    let Some(api_key) = read_cmd_api_key() else {
+        return Ok(usage_result(
+            "unavailable",
+            None,
+            None,
+            Some("Command Code not signed in".into()),
+        ));
+    };
+
+    let client = http_client();
+    let result = client
+        .get(CMD_CREDITS_URL)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("User-Agent", USER_AGENT)
+        .call();
+
+    match result {
+        Ok(response) => {
+            let http_status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            if (200..300).contains(&http_status) {
+                Ok(usage_result("ok", Some(http_status), Some(body), None))
+            } else {
+                Ok(usage_result(
+                    "error",
+                    Some(http_status),
+                    None,
+                    Some(format!("Command Code usage request failed ({http_status})")),
+                ))
+            }
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let _ = response.into_string();
+            let message = if status == 401 {
+                "Command Code sign-in expired".into()
+            } else {
+                format!("Command Code usage request failed ({status})")
+            };
+            Ok(usage_result("error", Some(status), None, Some(message)))
+        }
+        Err(error) => Ok(usage_result(
+            "error",
+            None,
+            None,
+            Some(format!("Command Code usage request failed: {error}")),
+        )),
+    }
+}
+
+pub(crate) fn cmd_auth_path() -> Option<PathBuf> {
+    let home = dirs_home().or_else(|| {
+        std::env::var_os("USERPROFILE").map(|value| value.to_string_lossy().into_owned())
+    })?;
+    Some(PathBuf::from(home).join(".commandcode/auth.json"))
+}
+
+pub(crate) fn extract_cmd_api_key(raw: &str) -> Option<String> {
+    let val: Value = serde_json::from_str(raw.trim()).ok()?;
+    let key = val.get("apiKey").and_then(Value::as_str)?.trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
+}
+
+fn read_cmd_api_key() -> Option<String> {
+    let path = cmd_auth_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    extract_cmd_api_key(&raw)
+}
+
+/// Fetch Antigravity (agy) quota summary or loadCodeAssist status.
+#[tauri::command]
+pub async fn fetch_agy_usage() -> Result<AgyUsageFetch, String> {
+    tauri::async_runtime::spawn_blocking(fetch_agy_usage_sync)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fetch_agy_usage_sync() -> Result<AgyUsageFetch, String> {
+    let Some(creds) = read_agy_credentials() else {
+        return Ok(usage_result(
+            "unavailable",
+            None,
+            None,
+            Some("Antigravity not signed in".into()),
+        ));
+    };
+
+    let client = http_client();
+
+    // 1. Prioritize loadCodeAssist on daily-cloudcode (standard for agy CLI) or prod
+    for base_url in [AGY_DAILY_CLOUDCODE_URL, AGY_PROD_CLOUDCODE_URL] {
+        let load_url = format!("{base_url}/v1internal:loadCodeAssist");
+        let result = client
+            .post(&load_url)
+            .set("Authorization", &format!("Bearer {}", creds.access_token))
+            .set("Content-Type", "application/json")
+            .set("User-Agent", USER_AGENT)
+            .send_string("{}");
+
+        match result {
+            Ok(response) => {
+                let http_status = response.status();
+                let body = response.into_string().unwrap_or_default();
+                if (200..300).contains(&http_status) {
+                    return Ok(usage_result("ok", Some(http_status), Some(body), None));
+                }
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let _ = response.into_string();
+                if status == 401 {
+                    return Ok(usage_result(
+                        "error",
+                        Some(status),
+                        None,
+                        Some("Antigravity sign-in expired".into()),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 2. Fallback to retrieveUserQuotaSummary if loadCodeAssist didn't return 200
+    for base_url in [AGY_DAILY_CLOUDCODE_URL, AGY_PROD_CLOUDCODE_URL] {
+        let quota_url = format!("{base_url}/v1internal:retrieveUserQuotaSummary");
+        let result = client
+            .post(&quota_url)
+            .set("Authorization", &format!("Bearer {}", creds.access_token))
+            .set("Content-Type", "application/json")
+            .set("User-Agent", USER_AGENT)
+            .send_string("{}");
+
+        if let Ok(response) = result {
+            let http_status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            if (200..300).contains(&http_status) {
+                return Ok(usage_result("ok", Some(http_status), Some(body), None));
+            }
+        }
+    }
+
+    Ok(usage_result(
+        "error",
+        None,
+        None,
+        Some("Antigravity usage request failed".into()),
+    ))
+}
+
+pub(crate) struct AgyCredentials {
+    pub(crate) access_token: String,
+}
+
+fn read_agy_credentials() -> Option<AgyCredentials> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(creds) = read_macos_keychain_agy_credentials() {
+            return Some(creds);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_keychain_agy_credentials() -> Option<AgyCredentials> {
+    let args = vec![
+        "find-generic-password".into(),
+        "-s".into(),
+        "gemini".into(),
+        "-a".into(),
+        "antigravity".into(),
+        "-w".into(),
+    ];
+    let secret = security_output(&args)?;
+    extract_agy_token(&secret)
+}
+
+pub(crate) fn extract_agy_token(secret: &str) -> Option<AgyCredentials> {
+    use base64::prelude::*;
+    let raw = secret.trim();
+    let b64 = if let Some(stripped) = raw.strip_prefix("go-keyring-base64:") {
+        stripped
+    } else {
+        raw
+    };
+    let decoded = BASE64_STANDARD.decode(b64.as_bytes()).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let blob: Value = serde_json::from_str(&text).ok()?;
+    let token = blob
+        .get("token")
+        .and_then(|t| t.get("access_token"))
+        .and_then(Value::as_str)?
+        .trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(AgyCredentials {
+            access_token: token.to_string(),
+        })
+    }
+}
+
 fn fetch_usage_with_token(token: &str) -> ClaudeUsageFetch {
-    let agent = ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build();
-    let result = agent
+    let client = http_client();
+    let result = client
         .get(OAUTH_USAGE_URL)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", OAUTH_BETA)
@@ -336,5 +563,36 @@ mod tests {
         assert!(token_expired(Some(now), now));
         assert!(token_expired(Some(now - 1), now));
         assert!(!token_expired(None, now));
+    }
+
+    #[test]
+    fn extract_cmd_api_key_reads_key() {
+        let raw = r#"{"apiKey":"user_123456","userName":"alice"}"#;
+        assert_eq!(extract_cmd_api_key(raw).as_deref(), Some("user_123456"));
+    }
+
+    #[test]
+    fn extract_cmd_api_key_rejects_empty() {
+        let raw = r#"{"apiKey":"  ","userName":"alice"}"#;
+        assert_eq!(extract_cmd_api_key(raw), None);
+        assert_eq!(extract_cmd_api_key("not json"), None);
+    }
+
+    #[test]
+    fn extract_agy_token_reads_base64_payload() {
+        use base64::prelude::*;
+        let payload = r#"{"token":{"access_token":"ya29.test12345"}}"#;
+        let b64 = BASE64_STANDARD.encode(payload);
+        let with_prefix = format!("go-keyring-base64:{b64}");
+        assert_eq!(
+            extract_agy_token(&with_prefix).map(|c| c.access_token),
+            Some("ya29.test12345".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_agy_token_rejects_invalid() {
+        assert!(extract_agy_token("not base64").is_none());
+        assert!(extract_agy_token("go-keyring-base64:not-valid").is_none());
     }
 }

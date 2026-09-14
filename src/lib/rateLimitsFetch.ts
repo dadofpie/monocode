@@ -2,7 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "./fs";
 import {
   errorRateLimits,
+  parseAgyUsage,
   parseClaudeOAuthUsage,
+  parseCmdUsage,
   parseCodexRateLimits,
   unavailableRateLimits,
   type ProviderRateLimits,
@@ -24,7 +26,7 @@ const REQUEST_TIMEOUT_MS = 12_000;
 export type CodexRateLimitResetOutcome =
   "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
 
-type ClaudeUsageFetch = {
+type ProviderUsageFetch = {
   status: "ok" | "error" | "unavailable" | string;
   httpStatus?: number | null;
   body?: string | null;
@@ -33,7 +35,7 @@ type ClaudeUsageFetch = {
 
 export async function fetchClaudeRateLimits(): Promise<ProviderRateLimits> {
   try {
-    const result = await invoke<ClaudeUsageFetch>("fetch_claude_usage");
+    const result = await invoke<ProviderUsageFetch>("fetch_claude_usage");
     if (result.status === "ok" && result.body) {
       const parsed = parseClaudeOAuthUsage(result.body);
       if (parsed.session || parsed.weekly) return parsed;
@@ -56,6 +58,64 @@ export async function fetchClaudeRateLimits(): Promise<ProviderRateLimits> {
     return errorRateLimits(
       "claude",
       error instanceof Error ? error.message : "Claude usage unavailable",
+    );
+  }
+}
+
+export async function fetchCmdRateLimits(): Promise<ProviderRateLimits> {
+  try {
+    const result = await invoke<ProviderUsageFetch>("fetch_cmd_usage");
+    if (result.status === "ok" && result.body) {
+      const parsed = parseCmdUsage(result.body);
+      if (parsed.session || parsed.weekly) return parsed;
+      return {
+        ...parsed,
+        status: parsed.status === "ok" ? "ok" : parsed.status,
+      };
+    }
+    if (result.status === "unavailable") {
+      return unavailableRateLimits(
+        "cmd",
+        result.error?.trim() || "Command Code not signed in",
+      );
+    }
+    return errorRateLimits(
+      "cmd",
+      result.error?.trim() || "Command Code usage unavailable",
+    );
+  } catch (error) {
+    return errorRateLimits(
+      "cmd",
+      error instanceof Error ? error.message : "Command Code usage unavailable",
+    );
+  }
+}
+
+export async function fetchAgyRateLimits(): Promise<ProviderRateLimits> {
+  try {
+    const result = await invoke<ProviderUsageFetch>("fetch_agy_usage");
+    if (result.status === "ok" && result.body) {
+      const parsed = parseAgyUsage(result.body);
+      if (parsed.session || parsed.weekly) return parsed;
+      return {
+        ...parsed,
+        status: parsed.status === "ok" ? "ok" : parsed.status,
+      };
+    }
+    if (result.status === "unavailable") {
+      return unavailableRateLimits(
+        "agy",
+        result.error?.trim() || "Antigravity not signed in",
+      );
+    }
+    return errorRateLimits(
+      "agy",
+      result.error?.trim() || "Antigravity usage unavailable",
+    );
+  } catch (error) {
+    return errorRateLimits(
+      "agy",
+      error instanceof Error ? error.message : "Antigravity usage unavailable",
     );
   }
 }

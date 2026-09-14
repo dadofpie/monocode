@@ -1,7 +1,9 @@
 import type { HarnessId } from "../session";
 import { HARNESSES } from "../session";
 import {
+  resolveAgyBinary,
   resolveClaudeBinary,
+  resolveCmdBinary,
   resolveCodexBinary,
   resolveCursorBinary,
   resolveFxBinary,
@@ -19,7 +21,9 @@ export type HarnessAvailability = Record<HarnessId, boolean>;
  * authenticated, so the hint must not blame a login.
  */
 const CLI: Record<HarnessId, { name: string; install?: string }> = {
+  agy: { name: "Antigravity CLI", install: "agy" },
   claude: { name: "Claude Code CLI" },
+  cmd: { name: "CommandCode CLI", install: "npm i -g command-code" },
   codex: { name: "Codex CLI" },
   cursor: { name: "Cursor CLI" },
   grok: {
@@ -33,7 +37,9 @@ const CLI: Record<HarnessId, { name: string; install?: string }> = {
 };
 
 let availability: HarnessAvailability = {
+  agy: false,
   claude: false,
+  cmd: false,
   codex: false,
   cursor: false,
   grok: false,
@@ -154,6 +160,22 @@ export function probeHarnessAvailability(
       if (id === "grok") {
         try {
           await resolveGrokBinary();
+          return [id, true] as const;
+        } catch {
+          return [id, false] as const;
+        }
+      }
+      if (id === "cmd") {
+        try {
+          await resolveCmdBinary();
+          return [id, true] as const;
+        } catch {
+          return [id, false] as const;
+        }
+      }
+      if (id === "agy") {
+        try {
+          await resolveAgyBinary();
           return [id, true] as const;
         } catch {
           return [id, false] as const;

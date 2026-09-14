@@ -40,7 +40,7 @@
     }
   },
   "bundle": {
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "active": true,
     "targets": "all",
     "icon": [
@@ -55,7 +55,7 @@
     },
     "macOS": {
       "entitlements": "Entitlements.plist",
-      "signingIdentity": "-"
+      "signingIdentity": "Apple Development: Jino Gabriel Piedad (DCWZDZ44KR)"
     }
   },
   "plugins": {

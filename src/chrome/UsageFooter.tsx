@@ -11,7 +11,9 @@ import { HarnessIcon } from "./HarnessIcon";
 import { Popover, type PopoverDismissReason } from "./Popover";
 import {
   consumeCodexRateLimitResetCredit,
+  fetchAgyRateLimits,
   fetchClaudeRateLimits,
+  fetchCmdRateLimits,
   fetchCodexRateLimits,
 } from "../lib/rateLimitsFetch";
 import {
@@ -67,19 +69,31 @@ export function UsageFooter({
 }) {
   const wantClaude = providers.includes("claude");
   const wantCodex = providers.includes("codex");
+  const wantCmd = providers.includes("cmd");
+  const wantAgy = providers.includes("agy");
   const [claude, setClaude] = useState<ProviderRateLimits>(() =>
     idleRateLimits("claude"),
   );
   const [codex, setCodex] = useState<ProviderRateLimits>(() =>
     idleRateLimits("codex"),
   );
+  const [cmd, setCmd] = useState<ProviderRateLimits>(() =>
+    idleRateLimits("cmd"),
+  );
+  const [agy, setAgy] = useState<ProviderRateLimits>(() =>
+    idleRateLimits("agy"),
+  );
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const inflight = useRef<Promise<void> | null>(null);
   const claudeRef = useRef(claude);
   const codexRef = useRef(codex);
+  const cmdRef = useRef(cmd);
+  const agyRef = useRef(agy);
   claudeRef.current = claude;
   codexRef.current = codex;
+  cmdRef.current = cmd;
+  agyRef.current = agy;
 
   const refresh = useCallback(
     (force = false) => {
@@ -90,7 +104,11 @@ export function UsageFooter({
         shouldFetchProvider(claudeRef.current, { force, visible });
       const fetchCodex =
         wantCodex && shouldFetchProvider(codexRef.current, { force, visible });
-      if (!fetchClaude && !fetchCodex) return;
+      const fetchCmd =
+        wantCmd && shouldFetchProvider(cmdRef.current, { force, visible });
+      const fetchAgy =
+        wantAgy && shouldFetchProvider(agyRef.current, { force, visible });
+      if (!fetchClaude && !fetchCodex && !fetchCmd && !fetchAgy) return;
       if (force) setRefreshing(true);
       const jobs: Promise<void>[] = [];
       if (fetchClaude) {
@@ -109,6 +127,22 @@ export function UsageFooter({
           }),
         );
       }
+      if (fetchCmd) {
+        setCmd((current) => fetchingRateLimits("cmd", current));
+        jobs.push(
+          fetchCmdRateLimits().then((value) => {
+            setCmd(value);
+          }),
+        );
+      }
+      if (fetchAgy) {
+        setAgy((current) => fetchingRateLimits("agy", current));
+        jobs.push(
+          fetchAgyRateLimits().then((value) => {
+            setAgy(value);
+          }),
+        );
+      }
       const run = Promise.allSettled(jobs)
         .then(() => undefined)
         .finally(() => {
@@ -118,7 +152,7 @@ export function UsageFooter({
       inflight.current = run;
       return run;
     },
-    [wantClaude, wantCodex],
+    [wantClaude, wantCodex, wantCmd, wantAgy],
   );
 
   useEffect(() => {
@@ -213,7 +247,7 @@ export function UsageFooter({
     [reconnectProvider],
   );
 
-  const showUsage = wantClaude || wantCodex;
+  const showUsage = wantClaude || wantCodex || wantCmd || wantAgy;
   const showTerminals = terminals.length > 0;
   const showTerminalButton = Boolean(onNewTerminal || onShowTerminal);
   const terminalLabel = projectTerminalActive
@@ -252,6 +286,12 @@ export function UsageFooter({
               onConsumeReset={consumeCodexReset}
               onReconnect={reconnectCodex}
             />
+          ) : null}
+          {wantCmd ? (
+            <UsageProviderChip limits={cmd} now={now} />
+          ) : null}
+          {wantAgy ? (
+            <UsageProviderChip limits={agy} now={now} />
           ) : null}
           <button
             type="button"

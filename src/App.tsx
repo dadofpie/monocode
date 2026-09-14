@@ -1125,7 +1125,12 @@ export default function App({
   }, [activeHarness]);
 
   const usageProviders = useMemo(() => {
-    if (active?.harness === "claude" || active?.harness === "codex") {
+    if (
+      active?.harness === "claude" ||
+      active?.harness === "codex" ||
+      active?.harness === "cmd" ||
+      active?.harness === "agy"
+    ) {
       return [active.harness];
     }
     return [];

@@ -9,7 +9,9 @@ import {
   idleRateLimits,
   isRateLimitSnapshotStale,
   mapUsageWindow,
+  parseAgyUsage,
   parseClaudeOAuthUsage,
+  parseCmdUsage,
   parseCodexRateLimits,
   parseResetTimestamp,
   RATE_LIMIT_MIN_REFETCH_MS,
@@ -360,5 +362,174 @@ describe("shouldFetchRateLimits", () => {
     expect(
       shouldFetchProvider(disconnected, { force: true, visible: true, now }),
     ).toBe(true);
+  });
+
+  it("checks cmd and agy providers when provided", () => {
+    expect(
+      shouldFetchRateLimits({
+        visible: true,
+        cmd: stale,
+        now,
+      }),
+    ).toBe(true);
+    expect(
+      shouldFetchRateLimits({
+        visible: true,
+        agy: fresh,
+        now,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("parseCmdUsage", () => {
+  it("parses Command Code windowLimits with fiveHour and weekly limits", () => {
+    const raw = JSON.stringify({
+      credits: {
+        belowThreshold: false,
+        creditThreshold: 0,
+        monthlyCredits: 7.94,
+        purchasedCredits: 0,
+        freeCredits: 0,
+      },
+      windowLimits: {
+        limited: true,
+        exceeded: null,
+        fiveHour: {
+          used: 0.03,
+          cap: 3,
+          exceeded: false,
+          resetAt: 1_789_375_829_850,
+        },
+        weekly: {
+          used: 2.056,
+          cap: 6,
+          exceeded: false,
+          resetAt: 1_789_835_280_103,
+        },
+      },
+    });
+    const limits = parseCmdUsage(raw);
+    expect(limits.status).toBe("ok");
+    expect(limits.provider).toBe("cmd");
+    expect(limits.session).not.toBeNull();
+    expect(limits.session?.windowMinutes).toBe(300);
+    expect(limits.session?.usedPercent).toBeCloseTo(1.0, 1);
+    expect(limits.session?.resetsAt).toBe(1_789_375_829_850);
+
+    expect(limits.weekly).not.toBeNull();
+    expect(limits.weekly?.windowMinutes).toBe(10_080);
+    expect(limits.weekly?.usedPercent).toBeCloseTo(34.27, 1);
+    expect(limits.weekly?.resetsAt).toBe(1_789_835_280_103);
+  });
+
+  it("parses snake_case window_limits and seven_day fallback", () => {
+    const raw = JSON.stringify({
+      window_limits: {
+        five_hour: {
+          used_percent: 45,
+          resets_at: "2026-09-14T15:00:00.000Z",
+        },
+        seven_day: {
+          usedPercent: 80,
+          resetAt: 1_789_835_280_000,
+        },
+      },
+    });
+    const limits = parseCmdUsage(raw);
+    expect(limits.status).toBe("ok");
+    expect(limits.session?.usedPercent).toBe(45);
+    expect(limits.session?.windowMinutes).toBe(300);
+    expect(limits.weekly?.usedPercent).toBe(80);
+    expect(limits.weekly?.windowMinutes).toBe(10_080);
+  });
+
+  it("returns error for invalid json", () => {
+    const limits = parseCmdUsage("invalid");
+    expect(limits.status).toBe("error");
+    expect(limits.session).toBeNull();
+    expect(limits.weekly).toBeNull();
+  });
+});
+
+describe("parseAgyUsage", () => {
+  it("parses quota summary buckets for 5h and weekly windows", () => {
+    const raw = JSON.stringify({
+      buckets: [
+        {
+          bucketId: "5h-bucket",
+          displayName: "5 Hour Limit",
+          window: "5h",
+          remainingFraction: 0.85,
+          resetTime: "2026-09-14T17:00:00.000Z",
+        },
+        {
+          bucketId: "weekly-bucket",
+          displayName: "Weekly Limit",
+          window: "7d",
+          remainingFraction: 0.4,
+          resetTime: { seconds: 1_789_835_280 },
+        },
+      ],
+    });
+    const limits = parseAgyUsage(raw);
+    expect(limits.status).toBe("ok");
+    expect(limits.provider).toBe("agy");
+    expect(limits.session?.windowMinutes).toBe(300);
+    expect(limits.session?.usedPercent).toBeCloseTo(15.0, 1);
+    expect(limits.session?.resetsAt).toBe(Date.parse("2026-09-14T17:00:00.000Z"));
+
+    expect(limits.weekly?.windowMinutes).toBe(10_080);
+    expect(limits.weekly?.usedPercent).toBeCloseTo(60.0, 1);
+    expect(limits.weekly?.resetsAt).toBe(1_789_835_280_000);
+  });
+
+  it("handles consumer standard-tier loadCodeAssist with empty buckets", () => {
+    const raw = JSON.stringify({
+      allowedTiers: [
+        {
+          id: "standard-tier",
+          name: "Gemini Code Assist",
+          description: "Unlimited coding assistant with the most powerful Gemini models",
+        },
+      ],
+    });
+    const limits = parseAgyUsage(raw);
+    expect(limits.status).toBe("ok");
+    expect(limits.provider).toBe("agy");
+    expect(limits.tier).toBe("unlimited");
+    expect(limits.session).toBeNull();
+    expect(limits.weekly).toBeNull();
+  });
+
+  it("parses duration strings like 18000s and 604800s for 5h and weekly windows", () => {
+    const raw = JSON.stringify({
+      buckets: [
+        {
+          bucketId: "code-assist-5h",
+          windowDuration: "18000s",
+          remainingFraction: 0.75,
+          resetTime: "2026-09-14T18:00:00.000Z",
+        },
+        {
+          bucketId: "code-assist-weekly",
+          windowDuration: "604800s",
+          remainingFraction: 0.5,
+          resetTime: "2026-09-21T00:00:00.000Z",
+        },
+      ],
+    });
+    const limits = parseAgyUsage(raw);
+    expect(limits.status).toBe("ok");
+    expect(limits.session?.windowMinutes).toBe(300);
+    expect(limits.session?.usedPercent).toBe(25);
+    expect(limits.weekly?.windowMinutes).toBe(10_080);
+    expect(limits.weekly?.usedPercent).toBe(50);
+  });
+
+  it("returns error for invalid json", () => {
+    const limits = parseAgyUsage("invalid");
+    expect(limits.status).toBe("error");
+    expect(limits.session).toBeNull();
   });
 });

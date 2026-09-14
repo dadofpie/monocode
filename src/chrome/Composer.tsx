@@ -1159,7 +1159,7 @@ export function Composer({
     if (files.length === 0) return;
     e.preventDefault();
     if (!attachmentsSupported) return;
-    void attachmentsFromFiles(files).then(addAttachments);
+    void attachmentsFromFiles(files, { snapshot: true }).then(addAttachments);
   };
 
   const attachFromPicker = () => {
