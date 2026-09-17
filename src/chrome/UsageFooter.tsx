@@ -13,8 +13,12 @@ import {
   consumeCodexRateLimitResetCredit,
   fetchAgyRateLimits,
   fetchClaudeRateLimits,
+  fetchCmdAccounts,
   fetchCmdRateLimits,
   fetchCodexRateLimits,
+  switchCmdAccount as requestCmdAccountSwitch,
+  type CmdAccountState,
+  type CmdAccountSwitch,
 } from "../lib/rateLimitsFetch";
 import {
   errorRateLimits,
@@ -83,6 +87,7 @@ export function UsageFooter({
   const [agy, setAgy] = useState<ProviderRateLimits>(() =>
     idleRateLimits("agy"),
   );
+  const [cmdAccounts, setCmdAccounts] = useState<CmdAccountState | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const inflight = useRef<Promise<void> | null>(null);
@@ -237,6 +242,41 @@ export function UsageFooter({
     [],
   );
 
+  const refreshCmdAccounts = useCallback(async () => {
+    if (!wantCmd) return;
+    try {
+      setCmdAccounts(await fetchCmdAccounts());
+    } catch {
+      // Keep the last known account list; switching stays available.
+    }
+  }, [wantCmd]);
+
+  useEffect(() => {
+    void refreshCmdAccounts();
+  }, [refreshCmdAccounts]);
+
+  const switchCmdAccount = useCallback(
+    async (id: string): Promise<CmdAccountSwitch> => {
+      while (inflight.current) await inflight.current;
+      setRefreshing(true);
+      let result: CmdAccountSwitch;
+      const operation = (async () => {
+        result = await requestCmdAccountSwitch(id);
+        setCmdAccounts(await fetchCmdAccounts());
+        // Usage is keyed to the active account file, so re-read it too.
+        setCmd(await fetchCmdRateLimits());
+      })();
+      const tracked = operation.finally(() => {
+        inflight.current = null;
+        setRefreshing(false);
+      });
+      inflight.current = tracked.catch(() => undefined);
+      await tracked;
+      return result!;
+    },
+    [],
+  );
+
   const reconnectClaude = useCallback(
     () => reconnectProvider("claude", fetchClaudeRateLimits, setClaude),
     [reconnectProvider],
@@ -288,7 +328,12 @@ export function UsageFooter({
             />
           ) : null}
           {wantCmd ? (
-            <UsageProviderChip limits={cmd} now={now} />
+            <UsageProviderChip
+              limits={cmd}
+              now={now}
+              cmdAccounts={cmdAccounts}
+              onSwitchCmdAccount={switchCmdAccount}
+            />
           ) : null}
           {wantAgy ? (
             <UsageProviderChip limits={agy} now={now} />

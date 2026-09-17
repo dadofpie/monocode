@@ -30,12 +30,20 @@ export type RateLimitResetCredits = {
   credits: RateLimitResetCredit[] | null;
 };
 
+export type CmdCreditBalance = {
+  monthlyCredits: number | null;
+  purchasedCredits: number | null;
+  freeCredits: number | null;
+};
+
 export type ProviderRateLimits = {
   provider: RateLimitProvider;
   session: RateLimitWindow | null;
   weekly: RateLimitWindow | null;
   /** Codex-only banked rate-limit reset rewards, when supplied by app-server. */
   resetCredits: RateLimitResetCredits | null;
+  /** Command Code credit balances from the billing endpoint, when present. */
+  cmdCredits?: CmdCreditBalance | null;
   updatedAt: number;
   error: string | null;
   status: RateLimitStatus;
@@ -341,6 +349,20 @@ export function mapCmdUsageWindow(
   };
 }
 
+export function parseCmdCreditBalance(
+  raw: unknown,
+): CmdCreditBalance | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const monthlyCredits = numberField(rec, "monthlyCredits");
+  const purchasedCredits = numberField(rec, "purchasedCredits");
+  const freeCredits = numberField(rec, "freeCredits");
+  if (monthlyCredits == null && purchasedCredits == null && freeCredits == null) {
+    return null;
+  }
+  return { monthlyCredits, purchasedCredits, freeCredits };
+}
+
 export function parseCmdUsage(body: string): ProviderRateLimits {
   let parsed: unknown;
   try {
@@ -364,12 +386,14 @@ export function parseCmdUsage(body: string): ProviderRateLimits {
 
   const session = mapCmdUsageWindow(fiveHourRaw, SESSION_WINDOW_MINUTES);
   const weekly = mapCmdUsageWindow(weeklyRaw, WEEKLY_WINDOW_MINUTES);
+  const cmdCredits = parseCmdCreditBalance(asRecord(rec.credits));
 
   return {
     provider: "cmd",
     session,
     weekly,
     resetCredits: null,
+    cmdCredits,
     updatedAt: Date.now(),
     error: null,
     status: "ok",

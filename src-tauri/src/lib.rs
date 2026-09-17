@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod chat_background;
 mod checkpoint;
+mod cmd_accounts;
 mod control;
 pub mod control_cli;
 mod cursor_store;
@@ -344,6 +345,8 @@ pub fn run() {
             rate_limits::fetch_claude_usage,
             rate_limits::fetch_cmd_usage,
             rate_limits::fetch_agy_usage,
+            cmd_accounts::list_cmd_accounts,
+            cmd_accounts::switch_cmd_account,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

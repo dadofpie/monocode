@@ -26,6 +26,27 @@ const REQUEST_TIMEOUT_MS = 12_000;
 export type CodexRateLimitResetOutcome =
   "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
 
+export type CmdAccountInfo = {
+  id: string;
+  userName: string;
+  keyName: string;
+};
+
+export type CmdAccountState = {
+  available: boolean;
+  accountsDir: string | null;
+  accounts: CmdAccountInfo[];
+  activeId: string | null;
+  currentUser: string | null;
+  currentKey: string | null;
+  hint: string | null;
+};
+
+export type CmdAccountSwitch = {
+  activeId: string;
+  userName: string;
+};
+
 type ProviderUsageFetch = {
   status: "ok" | "error" | "unavailable" | string;
   httpStatus?: number | null;
@@ -91,8 +112,15 @@ export async function fetchCmdRateLimits(): Promise<ProviderRateLimits> {
   }
 }
 
-export async function fetchAgyRateLimits(): Promise<ProviderRateLimits> {
-  try {
+export async function fetchCmdAccounts(): Promise<CmdAccountState> {
+  return invoke<CmdAccountState>("list_cmd_accounts");
+}
+
+export async function switchCmdAccount(id: string): Promise<CmdAccountSwitch> {
+  return invoke<CmdAccountSwitch>("switch_cmd_account", { id });
+}
+
+export async function fetchAgyRateLimits(): Promise<ProviderRateLimits> {  try {
     const result = await invoke<ProviderUsageFetch>("fetch_agy_usage");
     if (result.status === "ok" && result.body) {
       const parsed = parseAgyUsage(result.body);
