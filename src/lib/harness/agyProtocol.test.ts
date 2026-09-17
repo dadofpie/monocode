@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { Attachment } from "../session";
 import {
+  agyPromptWithAttachments,
   buildAgySpawnArgs,
   formatAgyErrorMessage,
   isAgyTransientNetworkError,
@@ -11,8 +13,7 @@ import {
 } from "./agyProtocol";
 
 describe("agy protocol", () => {
-  it("resumes with --conversation and stream-json print mode", () => {
-    expect(
+  it("resumes with --conversation and stream-json print mode", () => {    expect(
       buildAgySpawnArgs({
         text: "hi",
         resume: "conv-1",
@@ -32,6 +33,35 @@ describe("agy protocol", () => {
       "--model",
       "gemini-3.8-flash-high",
     ]);
+  });
+
+  it("sends pasted images as exact-read path references, never base64", () => {
+    // agy --input-format stream-json rejects image content blocks (verified
+    // against the CLI: only "text" is accepted), so like cmd the prompt must
+    // stay a short path reference and keep base64 out of argv.
+    const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const attachments: Attachment[] = [
+      {
+        id: "img",
+        name: "red.png",
+        mimeType: "image/png",
+        kind: "image",
+        size: 95,
+        path: "/tmp/monocode-attachments/red.png",
+        data,
+      },
+    ];
+    const prompt = agyPromptWithAttachments({ text: "look", attachments });
+    expect(prompt).toContain('"/tmp/monocode-attachments/red.png"');
+    expect(prompt).toContain("Read this exact file only");
+    expect(prompt).not.toContain("base64");
+    expect(prompt).not.toContain(data);
+    const args = buildAgySpawnArgs({
+      text: "look",
+      attachments,
+      runtimeMode: "supervised",
+    });
+    expect(args.join("\n")).not.toContain(data);
   });
 
   it("parses init, tools, and result frames", () => {

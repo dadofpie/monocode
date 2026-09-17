@@ -4651,7 +4651,10 @@ export default function App({
         );
         void (async () => {
           try {
-            const prepared = await prepareAttachments(attachments);
+            const prepared = await prepareAttachments(attachments, {
+              skipEmbed:
+                current.harness === "cmd" || current.harness === "agy",
+            });
             const prompt = await preparePrompt(harnessText, {
               harness: current.harness,
               sessionId,
@@ -4992,7 +4995,9 @@ export default function App({
         if (turnGen.current.get(sessionId) !== gen) return;
         let buildSucceeded = false;
         try {
-          const prepared = await prepareAttachments(attachments);
+          const prepared = await prepareAttachments(attachments, {
+            skipEmbed: current.harness === "cmd" || current.harness === "agy",
+          });
           const prompt =
             intent === "build" && approvedPlan
               ? buildPlanPrompt(approvedPlan.text)

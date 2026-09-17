@@ -211,4 +211,33 @@ describe("cmd protocol", () => {
     });
     expect(args[1]).toContain("Attached file");
   });
+
+  it("sends pasted images as exact-read path references, never base64", () => {
+    // cmd -p has no vision channel (verified against the CLI: markdown and
+    // @-mention forms also resolve through a read_file tool call), so the
+    // prompt must stay a short path reference and keep base64 out of argv.
+    const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const attachments: Attachment[] = [
+      {
+        id: "img",
+        name: "red.png",
+        mimeType: "image/png",
+        kind: "image",
+        size: 95,
+        path: "/tmp/monocode-attachments/red.png",
+        data,
+      },
+    ];
+    const prompt = cmdPromptWithAttachments({ text: "look", attachments });
+    expect(prompt).toContain('"/tmp/monocode-attachments/red.png"');
+    expect(prompt).toContain("Read this exact file only");
+    expect(prompt).not.toContain("base64");
+    expect(prompt).not.toContain(data);
+    const args = buildCmdSpawnArgs({
+      text: "look",
+      attachments,
+      runtimeMode: "supervised",
+    });
+    expect(args.join("\n")).not.toContain(data);
+  });
 });

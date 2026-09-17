@@ -255,6 +255,7 @@ export async function attachmentsFromFiles(
 
 export async function prepareAttachments(
   files: Attachment[],
+  options?: { skipEmbed?: boolean },
 ): Promise<Attachment[]> {
   return Promise.all(
     files.map(async (file) => {
@@ -264,6 +265,9 @@ export async function prepareAttachments(
         if (path) next = { ...next, path };
       }
       if (next.data || !next.path) return next;
+      // Print-mode CLIs (cmd/agy) only ever read the file path, so skip the
+      // base64 backfill they can never use (up to 20MB per image).
+      if (options?.skipEmbed) return next;
       if (!isVisionImage(next.mimeType) || next.size > MAX_EMBED_BYTES) {
         return next;
       }
