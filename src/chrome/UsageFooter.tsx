@@ -17,10 +17,13 @@ import {
   fetchCmdAccountsUsage,
   fetchCmdRateLimits,
   fetchCodexRateLimits,
+  fetchOpencodeUsageSummary,
   switchCmdAccount as requestCmdAccountSwitch,
   type CmdAccountState,
   type CmdAccountSwitch,
   type CmdAccountUsageSnapshot,
+  type OpencodeUsageSummary,
+  type OpencodeUsageTotals,
 } from "../lib/rateLimitsFetch";
 import {
   errorRateLimits,
@@ -104,6 +107,9 @@ export function UsageFooter({
     CmdAccountUsageSnapshot[] | null
   >(null);
   const cmdAccountsUsageAt = useRef(0);
+  const [opencodeSummary, setOpencodeSummary] =
+    useState<OpencodeUsageSummary | null>(null);
+  const opencodeSummaryAt = useRef(0);
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const inflight = useRef<Promise<void> | null>(null);
@@ -131,7 +137,8 @@ export function UsageFooter({
   const refresh = useCallback(
     (force = false) => {
       if (inflight.current) return inflight.current;
-      const visible = document.visibilityState === "visible";      const fetchClaude =
+      const visible = document.visibilityState === "visible";
+      const fetchClaude =
         wantClaude &&
         shouldFetchProvider(claudeRef.current, { force, visible });
       const fetchCodex =
@@ -279,10 +286,26 @@ export function UsageFooter({
     }
   }, [wantCmd]);
 
+  const refreshOpencodeSummary = useCallback(
+    async (force = false) => {
+      if (session?.harness !== "opencode") return;
+      const nowMs = Date.now();
+      if (!force && nowMs - opencodeSummaryAt.current < 60_000) return;
+      try {
+        setOpencodeSummary(await fetchOpencodeUsageSummary());
+        opencodeSummaryAt.current = Date.now();
+      } catch {
+        // The section falls back to its loading state.
+      }
+    },
+    [session?.harness],
+  );
+
   useEffect(() => {
     void refreshCmdAccounts();
     void refreshCmdAccountsUsage();
-  }, [refreshCmdAccounts, refreshCmdAccountsUsage]);
+    void refreshOpencodeSummary();
+  }, [refreshCmdAccounts, refreshCmdAccountsUsage, refreshOpencodeSummary]);
 
   const switchCmdAccount = useCallback(
     async (id: string): Promise<CmdAccountSwitch> => {
@@ -392,6 +415,8 @@ export function UsageFooter({
           <SessionUsageChip
             key={session.id ?? session.harness}
             session={session}
+            summary={opencodeSummary}
+            onRefreshSummary={() => void refreshOpencodeSummary()}
           />
         ) : (
           <SessionChip key={session.id ?? session.harness} session={session} />
@@ -543,13 +568,29 @@ function sessionTokenTotal(metrics: TurnMetrics): number {
   );
 }
 
+function opencodeTotalsText(totals: OpencodeUsageTotals): string {
+  const tokens =
+    totals.input + totals.output + totals.cacheRead + totals.cacheWrite;
+  const cost = totals.cost > 0.005 ? ` · $${totals.cost.toFixed(2)}` : "";
+  return `${formatTokens(tokens)}${cost}`;
+}
+
 /**
  * Clickable session usage chip for harnesses without provider billing
  * (OpenCode reports tokens per message, but OpenCode Go exposes no usage
- * endpoint). Totals come from the harness-reported aggregates already stored
- * on the session, so this needs no network at all.
+ * endpoint). Session totals come from the harness-reported aggregates already
+ * stored on the session; the over-time section is aggregated from the local
+ * OpenCode database and refreshed whenever the popover opens.
  */
-function SessionUsageChip({ session }: { session: UsageFooterSession }) {
+function SessionUsageChip({
+  session,
+  summary,
+  onRefreshSummary,
+}: {
+  session: UsageFooterSession;
+  summary?: OpencodeUsageSummary | null;
+  onRefreshSummary?: () => void;
+}) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const metrics = session.turnMetrics;
@@ -592,6 +633,11 @@ function SessionUsageChip({ session }: { session: UsageFooterSession }) {
     }
   };
 
+  const toggle = () => {
+    if (!open) onRefreshSummary?.();
+    setOpen((value) => !value);
+  };
+
   const rows: Array<{ label: string; value: string }> = [];
   if (metrics?.inputTokens) {
     rows.push({ label: "Input", value: formatTokens(metrics.inputTokens) });
@@ -631,7 +677,7 @@ function SessionUsageChip({ session }: { session: UsageFooterSession }) {
         aria-expanded={open}
         aria-haspopup="dialog"
         title={description}
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggle}
       >
         <HarnessIcon harness={session.harness} className="size-3 shrink-0" />
         <span className="tabular-nums">{label}</span>
@@ -723,6 +769,64 @@ function SessionUsageChip({ session }: { session: UsageFooterSession }) {
               </dl>
             </section>
           ) : null}
+
+          {summary ? (
+            summary.available ? (
+              <section className="mt-1.5 rounded-lg bg-content/[0.045] px-3 py-2.5 ring-1 ring-inset ring-content/[0.06]">
+                <h3 className="text-[11px] font-medium text-content/65">
+                  Usage over time
+                </h3>
+                <dl className="mt-1.5 flex flex-col gap-1">
+                  {[
+                    { label: "Last 24 hours", totals: summary.day },
+                    { label: "Last 7 days", totals: summary.week },
+                    { label: "Last 30 days", totals: summary.month },
+                  ].map((entry) => (
+                    <div
+                      key={entry.label}
+                      className="flex items-baseline justify-between gap-3 text-[10px] leading-4"
+                    >
+                      <dt className="text-content/40">{entry.label}</dt>
+                      <dd className="shrink-0 font-medium tabular-nums">
+                        {opencodeTotalsText(entry.totals)}
+                      </dd>
+                    </div>
+                  ))}
+                  {summary.topModels.slice(0, 3).map((model) => (
+                    <div
+                      key={model.model}
+                      className="flex items-baseline justify-between gap-3 text-[10px] leading-4"
+                    >
+                      <dt
+                        className="min-w-0 flex-1 truncate text-content/40"
+                        title={`${model.provider}/${model.model}`}
+                      >
+                        {model.model}
+                      </dt>
+                      <dd className="shrink-0 font-medium tabular-nums">
+                        {formatTokens(model.tokens)}
+                        {model.cost > 0.005
+                          ? ` · $${model.cost.toFixed(2)}`
+                          : ""}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+                <p className="mt-1.5 text-[10px] leading-4 text-content/40">
+                  {summary.sessions30d} session
+                  {summary.sessions30d === 1 ? "" : "s"} in 30 days
+                </p>
+              </section>
+            ) : (
+              <p className="mt-1.5 px-1 text-[10px] leading-4 text-content/40">
+                Usage history unavailable.
+              </p>
+            )
+          ) : (
+            <p className="mt-1.5 px-1 text-[10px] leading-4 text-content/40">
+              Loading usage history…
+            </p>
+          )}
 
           {!context && rows.length === 0 ? (
             <div className="rounded-lg bg-content/[0.04] px-3 py-4 text-center ring-1 ring-inset ring-content/[0.06]">

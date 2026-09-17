@@ -4,12 +4,17 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageFooter } from "./UsageFooter";
 
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 
 let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  invoke.mockReset();
+  invoke.mockRejectedValue(new Error("No native bridge"));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -68,6 +73,86 @@ describe("UsageFooter session usage", () => {
     expect(dialog?.textContent).toContain("Tokens this session");
     expect(dialog?.textContent).toContain("Input");
     expect(dialog?.textContent).toContain("Cache read");
+  });
+
+  it("shows cross-session usage over time", async () => {
+    invoke.mockResolvedValue({
+      available: true,
+      day: {
+        input: 1000,
+        output: 500,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0.02,
+        messages: 3,
+      },
+      week: {
+        input: 7000,
+        output: 2000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0.2,
+        messages: 20,
+      },
+      month: {
+        input: 100_000,
+        output: 20_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 1.5,
+        messages: 200,
+      },
+      sessions30d: 12,
+      topModels: [
+        {
+          model: "muse-spark",
+          provider: "opencode",
+          tokens: 9000,
+          cost: 0.1,
+          messages: 5,
+        },
+      ],
+      updatedAtMs: Date.now(),
+    });
+    act(() =>
+      root.render(
+        createElement(UsageFooter, {
+          providers: [],
+          session: {
+            id: "session-1",
+            harness: "opencode",
+            turnMetrics: { inputTokens: 100, outputTokens: 50 },
+          },
+        }),
+      ),
+    );
+
+    await act(async () => button("Session usage details").click());
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(invoke).toHaveBeenCalledWith("fetch_opencode_usage_summary");
+    expect(dialog?.textContent).toContain("Usage over time");
+    expect(dialog?.textContent).toContain("Last 24 hours");
+    expect(dialog?.textContent).toContain("1.5K · $0.02");
+    expect(dialog?.textContent).toContain("12 sessions in 30 days");
+    expect(dialog?.textContent).toContain("muse-spark");
+  });
+
+  it("waits for usage history while it loads", async () => {
+    act(() =>
+      root.render(
+        createElement(UsageFooter, {
+          providers: [],
+          session: {
+            id: "session-1",
+            harness: "opencode",
+            turnMetrics: { inputTokens: 100, outputTokens: 50 },
+          },
+        }),
+      ),
+    );
+
+    await act(async () => button("Session usage details").click());
+    expect(document.body.textContent).toContain("Loading usage history…");
   });
 
   it("falls back to the static session label until usage is reported", () => {

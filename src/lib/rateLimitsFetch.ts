@@ -135,6 +135,37 @@ export async function fetchCmdAccountsUsage(): Promise<
   return invoke<CmdAccountUsageSnapshot[]>("fetch_cmd_accounts_usage");
 }
 
+export type OpencodeUsageTotals = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+  messages: number;
+};
+
+export type OpencodeModelUsage = {
+  model: string;
+  provider: string;
+  tokens: number;
+  cost: number;
+  messages: number;
+};
+
+export type OpencodeUsageSummary = {
+  available: boolean;
+  day: OpencodeUsageTotals;
+  week: OpencodeUsageTotals;
+  month: OpencodeUsageTotals;
+  sessions30d: number;
+  topModels: OpencodeModelUsage[];
+  updatedAtMs: number;
+};
+
+export async function fetchOpencodeUsageSummary(): Promise<OpencodeUsageSummary> {
+  return invoke<OpencodeUsageSummary>("fetch_opencode_usage_summary");
+}
+
 export async function fetchAgyRateLimits(): Promise<ProviderRateLimits> {  try {
     const result = await invoke<ProviderUsageFetch>("fetch_agy_usage");
     if (result.status === "ok" && result.body) {

@@ -17,6 +17,7 @@ mod macos;
 mod menu;
 mod notes;
 mod notifications;
+mod opencode_usage;
 mod project_logo;
 mod pty;
 mod rate_limits;
@@ -348,6 +349,7 @@ pub fn run() {
             cmd_accounts::list_cmd_accounts,
             cmd_accounts::switch_cmd_account,
             cmd_accounts::fetch_cmd_accounts_usage,
+            opencode_usage::fetch_opencode_usage_summary,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

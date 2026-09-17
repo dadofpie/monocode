@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import {
   fetchCmdAccounts,
   fetchCmdAccountsUsage,
+  fetchOpencodeUsageSummary,
   switchCmdAccount,
 } from "./rateLimitsFetch";
 
@@ -35,5 +36,12 @@ describe("Command Code account bridge", () => {
     invoke.mockResolvedValue(snapshots);
     await expect(fetchCmdAccountsUsage()).resolves.toBe(snapshots);
     expect(invoke).toHaveBeenCalledWith("fetch_cmd_accounts_usage");
+  });
+
+  it("fetches the opencode usage summary", async () => {
+    const summary = { available: true, day: {}, week: {}, month: {} };
+    invoke.mockResolvedValue(summary);
+    await expect(fetchOpencodeUsageSummary()).resolves.toBe(summary);
+    expect(invoke).toHaveBeenCalledWith("fetch_opencode_usage_summary");
   });
 });
