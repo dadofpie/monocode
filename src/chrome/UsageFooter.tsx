@@ -388,12 +388,14 @@ export function UsageFooter({
           </button>
         </>
       ) : session ? (
-        <>
+        session.harness === "opencode" ? (
+          <SessionUsageChip
+            key={session.id ?? session.harness}
+            session={session}
+          />
+        ) : (
           <SessionChip key={session.id ?? session.harness} session={session} />
-          {session.harness === "opencode" ? (
-            <SessionUsageChip session={session} />
-          ) : null}
-        </>
+        )
       ) : null}
       {showTerminals || showTerminalButton ? (
         <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -555,14 +557,27 @@ function SessionUsageChip({ session }: { session: UsageFooterSession }) {
   const percent = contextPercent(context);
   const total = metrics ? sessionTokenTotal(metrics) : 0;
   const hasTokens = metrics != null && total > 0;
-  if (!hasTokens && percent == null) return null;
+  // Without reported usage this is just the static session label, exactly
+  // what SessionChip renders for harnesses with no sign-in flow.
+  if (!hasTokens && percent == null) {
+    return (
+      <span
+        className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap"
+        title={HARNESS_TITLE[session.harness]}
+      >
+        <HarnessIcon harness={session.harness} className="size-3 shrink-0" />
+        <span>{HARNESS_LABEL[session.harness]}</span>
+      </span>
+    );
+  }
 
-  const label =
+  const usageLabel =
     percent != null && hasTokens
       ? `${percent}% · ${formatTokens(total)}`
       : percent != null
         ? `${percent}%`
         : formatTokens(total);
+  const label = `${HARNESS_LABEL[session.harness]} ${usageLabel}`;
   const description =
     percent != null && hasTokens
       ? `${percent}% context · ${formatTokens(total)} tokens this session`

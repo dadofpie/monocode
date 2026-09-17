@@ -52,7 +52,11 @@ describe("UsageFooter session usage", () => {
     );
 
     const trigger = button("Session usage details");
-    expect(trigger.textContent).toContain("50% · 170K");
+    expect(trigger.textContent).toContain("opencode 50% · 170K");
+    // Session label and usage merge into a single chip.
+    expect(
+      document.querySelectorAll("footer button"),
+    ).toHaveLength(1);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     await act(async () => trigger.click());
 
@@ -66,7 +70,7 @@ describe("UsageFooter session usage", () => {
     expect(dialog?.textContent).toContain("Cache read");
   });
 
-  it("omits the chip until the harness reports usage", () => {
+  it("falls back to the static session label until usage is reported", () => {
     act(() =>
       root.render(
         createElement(UsageFooter, {
@@ -79,6 +83,7 @@ describe("UsageFooter session usage", () => {
     expect(
       document.querySelector('button[aria-label="Session usage details"]'),
     ).toBeNull();
+    expect(document.body.textContent).toContain("opencode");
   });
 
   it("keeps provider-less harnesses other than opencode unchanged", () => {
