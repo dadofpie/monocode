@@ -8,10 +8,10 @@ use crate::dirs_home;
 
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
-const USER_AGENT: &str = "claude-code/2.1.0";
+pub(crate) const USER_AGENT: &str = "claude-code/2.1.0";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn http_client() -> &'static ureq::Agent {
+pub(crate) fn http_client() -> &'static ureq::Agent {
     static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build())
 }
@@ -36,7 +36,7 @@ pub type ClaudeUsageFetch = ProviderUsageFetch;
 pub type CmdUsageFetch = ProviderUsageFetch;
 pub type AgyUsageFetch = ProviderUsageFetch;
 
-const CMD_CREDITS_URL: &str = "https://api.commandcode.ai/alpha/billing/credits";
+pub(crate) const CMD_CREDITS_URL: &str = "https://api.commandcode.ai/alpha/billing/credits";
 const AGY_DAILY_CLOUDCODE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 const AGY_PROD_CLOUDCODE_URL: &str = "https://cloudcode-pa.googleapis.com";
 

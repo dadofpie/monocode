@@ -263,6 +263,16 @@ describe("UsageProviderChip for Command Code", () => {
     };
   }
 
+  function usageBody(fiveUsed: number, weeklyUsed: number): string {
+    return JSON.stringify({
+      credits: { monthlyCredits: 1, purchasedCredits: 0, freeCredits: 0 },
+      windowLimits: {
+        fiveHour: { used: fiveUsed, cap: 3, resetAt: 0 },
+        weekly: { used: weeklyUsed, cap: 6, resetAt: 0 },
+      },
+    });
+  }
+
   it("shows usage windows, credit balances, and the account list", async () => {
     act(() =>
       root.render(
@@ -288,6 +298,73 @@ describe("UsageProviderChip for Command Code", () => {
     expect(dialog?.textContent).toContain("gpiedadpersvk0y");
     expect(dialog?.textContent).toContain("Active");
     expect(dialog?.textContent).toContain("Switch");
+  });
+
+  it("shows per-account usage limits for swap decisions", async () => {
+    act(() =>
+      root.render(
+        createElement(UsageProviderChip, {
+          limits: cmdLimits(),
+          now,
+          cmdAccounts: cmdAccounts(),
+          cmdAccountsUsage: [
+            {
+              id: "1",
+              userName: "onlygabriel1999gbum",
+              keyName: "key-one",
+              status: "ok",
+              body: usageBody(0, 2.42),
+              error: null,
+            },
+            {
+              id: "2",
+              userName: "gpiedadpersvk0y",
+              keyName: "key-two",
+              status: "error",
+              body: null,
+              error: "Command Code sign-in expired",
+            },
+          ],
+        }),
+      ),
+    );
+
+    await act(async () => button("CommandCode usage details").click());
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain("5h 0% · wk 40%");
+    expect(dialog?.textContent).toContain("Command Code sign-in expired");
+  });
+
+  it("marks per-account usage as pending before snapshots load", async () => {
+    act(() =>
+      root.render(
+        createElement(UsageProviderChip, {
+          limits: cmdLimits(),
+          now,
+          cmdAccounts: cmdAccounts(),
+        }),
+      ),
+    );
+
+    await act(async () => button("CommandCode usage details").click());
+    expect(document.body.textContent).toContain("checking usage…");
+  });
+
+  it("refreshes account usage when the popover opens", async () => {
+    const onRefreshCmdAccountsUsage = vi.fn();
+    act(() =>
+      root.render(
+        createElement(UsageProviderChip, {
+          limits: cmdLimits(),
+          now,
+          cmdAccounts: cmdAccounts(),
+          onRefreshCmdAccountsUsage,
+        }),
+      ),
+    );
+
+    await act(async () => button("CommandCode usage details").click());
+    expect(onRefreshCmdAccountsUsage).toHaveBeenCalledOnce();
   });
 
   it("switches to the chosen account", async () => {

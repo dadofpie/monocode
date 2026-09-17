@@ -14,11 +14,13 @@ import {
   fetchAgyRateLimits,
   fetchClaudeRateLimits,
   fetchCmdAccounts,
+  fetchCmdAccountsUsage,
   fetchCmdRateLimits,
   fetchCodexRateLimits,
   switchCmdAccount as requestCmdAccountSwitch,
   type CmdAccountState,
   type CmdAccountSwitch,
+  type CmdAccountUsageSnapshot,
 } from "../lib/rateLimitsFetch";
 import {
   errorRateLimits,
@@ -88,6 +90,10 @@ export function UsageFooter({
     idleRateLimits("agy"),
   );
   const [cmdAccounts, setCmdAccounts] = useState<CmdAccountState | null>(null);
+  const [cmdAccountsUsage, setCmdAccountsUsage] = useState<
+    CmdAccountUsageSnapshot[] | null
+  >(null);
+  const cmdAccountsUsageAt = useRef(0);
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const inflight = useRef<Promise<void> | null>(null);
@@ -100,11 +106,22 @@ export function UsageFooter({
   cmdRef.current = cmd;
   agyRef.current = agy;
 
+  const refreshCmdAccountsUsage = useCallback(async (force = false) => {
+    if (!wantCmd) return;
+    const nowMs = Date.now();
+    if (!force && nowMs - cmdAccountsUsageAt.current < 60_000) return;
+    try {
+      setCmdAccountsUsage(await fetchCmdAccountsUsage());
+      cmdAccountsUsageAt.current = Date.now();
+    } catch {
+      // Rows fall back to "usage unavailable"; the account list still works.
+    }
+  }, [wantCmd]);
+
   const refresh = useCallback(
     (force = false) => {
       if (inflight.current) return inflight.current;
-      const visible = document.visibilityState === "visible";
-      const fetchClaude =
+      const visible = document.visibilityState === "visible";      const fetchClaude =
         wantClaude &&
         shouldFetchProvider(claudeRef.current, { force, visible });
       const fetchCodex =
@@ -115,6 +132,7 @@ export function UsageFooter({
         wantAgy && shouldFetchProvider(agyRef.current, { force, visible });
       if (!fetchClaude && !fetchCodex && !fetchCmd && !fetchAgy) return;
       if (force) setRefreshing(true);
+      if (force && wantCmd) void refreshCmdAccountsUsage(true);
       const jobs: Promise<void>[] = [];
       if (fetchClaude) {
         setClaude((current) => fetchingRateLimits("claude", current));
@@ -157,7 +175,7 @@ export function UsageFooter({
       inflight.current = run;
       return run;
     },
-    [wantClaude, wantCodex, wantCmd, wantAgy],
+    [wantClaude, wantCodex, wantCmd, wantAgy, refreshCmdAccountsUsage],
   );
 
   useEffect(() => {
@@ -253,7 +271,8 @@ export function UsageFooter({
 
   useEffect(() => {
     void refreshCmdAccounts();
-  }, [refreshCmdAccounts]);
+    void refreshCmdAccountsUsage();
+  }, [refreshCmdAccounts, refreshCmdAccountsUsage]);
 
   const switchCmdAccount = useCallback(
     async (id: string): Promise<CmdAccountSwitch> => {
@@ -265,6 +284,7 @@ export function UsageFooter({
         setCmdAccounts(await fetchCmdAccounts());
         // Usage is keyed to the active account file, so re-read it too.
         setCmd(await fetchCmdRateLimits());
+        await refreshCmdAccountsUsage(true);
       })();
       const tracked = operation.finally(() => {
         inflight.current = null;
@@ -274,7 +294,7 @@ export function UsageFooter({
       await tracked;
       return result!;
     },
-    [],
+    [refreshCmdAccountsUsage],
   );
 
   const reconnectClaude = useCallback(
@@ -332,7 +352,11 @@ export function UsageFooter({
               limits={cmd}
               now={now}
               cmdAccounts={cmdAccounts}
+              cmdAccountsUsage={cmdAccountsUsage}
               onSwitchCmdAccount={switchCmdAccount}
+              onRefreshCmdAccountsUsage={() =>
+                void refreshCmdAccountsUsage()
+              }
             />
           ) : null}
           {wantAgy ? (

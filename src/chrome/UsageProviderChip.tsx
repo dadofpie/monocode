@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   clampUsedPercent,
   formatRateLimitWindowChipLabel,
@@ -6,6 +6,7 @@ import {
   formatResetDuration,
   formatUsagePercent,
   formatWindowLabel,
+  parseCmdUsage,
   rateLimitWindowTooltip,
   type CmdCreditBalance,
   type ProviderRateLimits,
@@ -15,6 +16,7 @@ import {
 import type {
   CmdAccountState,
   CmdAccountSwitch,
+  CmdAccountUsageSnapshot,
   CodexRateLimitResetOutcome,
 } from "../lib/rateLimitsFetch";
 import { mascotPath, projectMascot } from "../lib/projectMascots";
@@ -50,7 +52,9 @@ export function UsageProviderChip({
   onConsumeReset,
   onReconnect,
   cmdAccounts,
+  cmdAccountsUsage,
   onSwitchCmdAccount,
+  onRefreshCmdAccountsUsage,
 }: {
   limits: ProviderRateLimits;
   now: number;
@@ -58,7 +62,9 @@ export function UsageProviderChip({
   onConsumeReset?: (creditId?: string) => Promise<CodexRateLimitResetOutcome>;
   onReconnect?: () => Promise<void>;
   cmdAccounts?: CmdAccountState | null;
+  cmdAccountsUsage?: CmdAccountUsageSnapshot[] | null;
   onSwitchCmdAccount?: (id: string) => Promise<CmdAccountSwitch>;
+  onRefreshCmdAccountsUsage?: () => void;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -117,6 +123,11 @@ export function UsageProviderChip({
     }
   };
 
+  const toggle = () => {
+    if (!open && limits.provider === "cmd") onRefreshCmdAccountsUsage?.();
+    setOpen((value) => !value);
+  };
+
   const useReset = async (
     credit: RateLimitResetCredit | undefined,
     rowKey: string,
@@ -168,7 +179,7 @@ export function UsageProviderChip({
               ? "Loading usage…"
               : "Usage details")
         }
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggle}
       >
         <HarnessIcon harness={limits.provider} className="size-3 shrink-0" />
         {loading ? (
@@ -295,6 +306,7 @@ export function UsageProviderChip({
                   <CmdCreditsCard credits={limits.cmdCredits} />
                   <CmdAccountSwitcher
                     state={cmdAccounts}
+                    usage={cmdAccountsUsage}
                     canSwitch={Boolean(onSwitchCmdAccount)}
                     onSwitch={onSwitchCmdAccount}
                   />
@@ -701,17 +713,56 @@ function formatCreditBalance(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+function formatCmdAccountUsageLine(
+  parsed: ProviderRateLimits | undefined,
+  snapshotError: string | undefined,
+  loaded: boolean,
+): string {
+  if (parsed) {
+    const parts: string[] = [];
+    if (parsed.session) {
+      parts.push(`5h ${formatUsagePercent(parsed.session.usedPercent)}`);
+    }
+    if (parsed.weekly) {
+      parts.push(`wk ${formatUsagePercent(parsed.weekly.usedPercent)}`);
+    }
+    if (parts.length > 0) return parts.join(" · ");
+  }
+  if (snapshotError) return snapshotError;
+  return loaded ? "usage unavailable" : "checking usage…";
+}
+
 function CmdAccountSwitcher({
   state,
+  usage,
   canSwitch,
   onSwitch,
 }: {
   state: CmdAccountState | null | undefined;
+  usage?: CmdAccountUsageSnapshot[] | null;
   canSwitch: boolean;
   onSwitch?: (id: string) => Promise<CmdAccountSwitch>;
 }) {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const usageById = useMemo(() => {
+    const map = new Map<string, ProviderRateLimits>();
+    for (const snapshot of usage ?? []) {
+      if (snapshot.status === "ok" && snapshot.body) {
+        map.set(snapshot.id, parseCmdUsage(snapshot.body));
+      }
+    }
+    return map;
+  }, [usage]);
+  const usageErrors = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const snapshot of usage ?? []) {
+      if (snapshot.status !== "ok" && snapshot.error) {
+        map.set(snapshot.id, snapshot.error);
+      }
+    }
+    return map;
+  }, [usage]);
   if (!state) return null;
   if (!state.available || state.accounts.length === 0) {
     if (!state.hint) return null;
@@ -777,6 +828,13 @@ function CmdAccountSwitcher({
                   </p>
                   <p className="truncate text-[10px] leading-4 text-content/40">
                     {account.keyName}
+                  </p>
+                  <p className="truncate text-[10px] leading-4 tabular-nums text-content/40">
+                    {formatCmdAccountUsageLine(
+                      usageById.get(account.id),
+                      usageErrors.get(account.id),
+                      usage !== null && usage !== undefined,
+                    )}
                   </p>
                 </div>
                 {isActive ? (

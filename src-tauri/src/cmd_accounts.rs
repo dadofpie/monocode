@@ -327,6 +327,202 @@ pub async fn switch_cmd_account(id: String) -> Result<CmdAccountSwitch, String> 
         .map_err(|e| e.to_string())?
 }
 
+/// Per-account usage snapshot for the account switcher.
+/// `body` is the raw billing-endpoint JSON for the frontend to parse with the
+/// same parser as the active account; it is scrubbed of the account's API key
+/// before crossing to the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CmdAccountUsageSnapshot {
+    pub id: String,
+    pub user_name: String,
+    pub key_name: String,
+    pub status: String,
+    pub body: Option<String>,
+    pub error: Option<String>,
+}
+
+pub(crate) enum AccountUsageFetch {
+    Ok {
+        http_status: u16,
+        body: String,
+    },
+    Err {
+        http_status: Option<u16>,
+        message: String,
+    },
+}
+
+fn snapshot_ok(
+    id: String,
+    user_name: String,
+    key_name: String,
+    body: String,
+    api_key: &str,
+) -> CmdAccountUsageSnapshot {
+    // Defense in depth: the billing payload should never echo the key, but
+    // scrub it anyway so a secret can never reach the webview.
+    let body = if api_key.is_empty() {
+        body
+    } else {
+        body.replace(api_key, "***")
+    };
+    CmdAccountUsageSnapshot {
+        id,
+        user_name,
+        key_name,
+        status: "ok".into(),
+        body: Some(body),
+        error: None,
+    }
+}
+
+fn snapshot_err(
+    id: String,
+    user_name: String,
+    key_name: String,
+    message: &str,
+) -> CmdAccountUsageSnapshot {
+    CmdAccountUsageSnapshot {
+        id,
+        user_name,
+        key_name,
+        status: "error".into(),
+        body: None,
+        error: Some(message.into()),
+    }
+}
+
+fn snapshot_from_fetch(
+    id: String,
+    user_name: String,
+    key_name: String,
+    api_key: &str,
+    fetch: AccountUsageFetch,
+) -> CmdAccountUsageSnapshot {
+    match fetch {
+        AccountUsageFetch::Ok { http_status, body } if (200..300).contains(&http_status) => {
+            snapshot_ok(id, user_name, key_name, body, api_key)
+        }
+        AccountUsageFetch::Ok { http_status, .. } => snapshot_err(
+            id,
+            user_name,
+            key_name,
+            &format!("Usage request failed ({http_status})"),
+        ),
+        AccountUsageFetch::Err {
+            http_status: Some(401),
+            ..
+        } => snapshot_err(id, user_name, key_name, "Command Code sign-in expired"),
+        AccountUsageFetch::Err {
+            http_status: Some(status),
+            ..
+        } => snapshot_err(
+            id,
+            user_name,
+            key_name,
+            &format!("Usage request failed ({status})"),
+        ),
+        AccountUsageFetch::Err { message, .. } => snapshot_err(id, user_name, key_name, &message),
+    }
+}
+
+/// Fetch a usage snapshot for every stored account, concurrently.
+/// The fetcher is injected so tests can stub the network.
+pub(crate) fn collect_accounts_usage<F>(
+    accounts_dir: &Path,
+    fetch: F,
+) -> Vec<CmdAccountUsageSnapshot>
+where
+    F: Fn(&str) -> AccountUsageFetch + Sync + Send,
+{
+    let mut inputs: Vec<(String, String, String, Option<String>)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(accounts_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = parse_account_id(&name) else {
+                continue;
+            };
+            let raw = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            let (user_name, key_name) = read_identity(&raw);
+            let api_key = crate::rate_limits::extract_cmd_api_key(&raw);
+            inputs.push((id, user_name, key_name, api_key));
+        }
+    }
+    inputs.sort_by(|a, b| compare_account_ids(&a.0, &b.0));
+
+    let fetch_ref = &fetch;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = inputs
+            .into_iter()
+            .map(|(id, user_name, key_name, api_key)| {
+                scope.spawn(move || {
+                    let Some(api_key) = api_key else {
+                        return snapshot_err(
+                            id,
+                            user_name,
+                            key_name,
+                            "That account file has no API key.",
+                        );
+                    };
+                    snapshot_from_fetch(id, user_name, key_name, &api_key, fetch_ref(&api_key))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("usage fetch thread"))
+            .collect()
+    })
+}
+
+fn live_account_usage_fetch(api_key: &str) -> AccountUsageFetch {
+    let result = crate::rate_limits::http_client()
+        .get(crate::rate_limits::CMD_CREDITS_URL)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("User-Agent", crate::rate_limits::USER_AGENT)
+        .call();
+    match result {
+        Ok(response) => {
+            let http_status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            AccountUsageFetch::Ok { http_status, body }
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let _ = response.into_string();
+            AccountUsageFetch::Err {
+                http_status: Some(status),
+                message: format!("Usage request failed ({status})"),
+            }
+        }
+        Err(error) => AccountUsageFetch::Err {
+            http_status: None,
+            message: format!("Usage request failed: {error}"),
+        },
+    }
+}
+
+fn fetch_accounts_usage_sync(accounts_dir: PathBuf) -> Vec<CmdAccountUsageSnapshot> {
+    collect_accounts_usage(&accounts_dir, live_account_usage_fetch)
+}
+
+fn cmd_accounts_dir() -> Option<PathBuf> {
+    let home = dirs_home()?;
+    let path_var = std::env::var("PATH").ok();
+    resolve_cc_switch(&PathBuf::from(&home), path_var.as_deref()).map(|layout| layout.accounts_dir)
+}
+
+/// Fetch a usage snapshot for every stored Command Code account so the
+/// switcher can show per-account limits. API keys never leave the backend.
+#[tauri::command]
+pub async fn fetch_cmd_accounts_usage() -> Result<Vec<CmdAccountUsageSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        Ok(cmd_accounts_dir().map_or_else(Vec::new, fetch_accounts_usage_sync))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +685,94 @@ mod tests {
         // An empty PATH (e.g. Finder-launched apps) still resolves via $HOME.
         let layout = resolve_cc_switch(&root.join("home"), Some("")).unwrap();
         assert_eq!(layout.accounts_dir, root.join("home/.local/bin/accounts"));
+    }
+
+    fn usage_body() -> String {
+        r#"{"credits":{"monthlyCredits":7.5,"purchasedCredits":0,"freeCredits":0},"windowLimits":{"fiveHour":{"used":1.5,"cap":3,"resetAt":0},"weekly":{"used":2,"cap":6,"resetAt":1789835280103}}}"#.into()
+    }
+
+    #[test]
+    fn usage_snapshots_redact_keys_and_report_auth_failures() {
+        let ok = snapshot_from_fetch(
+            "1".into(),
+            "one".into(),
+            "k-one".into(),
+            "secret-1",
+            AccountUsageFetch::Ok {
+                http_status: 200,
+                body: r#"{"echo":"secret-1","windowLimits":{}}"#.into(),
+            },
+        );
+        assert_eq!(ok.status, "ok");
+        let body = ok.body.as_ref().expect("ok snapshot carries a body");
+        assert!(!body.contains("secret-1"));
+        assert!(body.contains("***"));
+        // Nothing secret may cross to the frontend.
+        let json = serde_json::to_string(&ok).unwrap();
+        assert!(!json.contains("secret-1"));
+
+        let expired = snapshot_from_fetch(
+            "2".into(),
+            "two".into(),
+            "k-two".into(),
+            "secret-2",
+            AccountUsageFetch::Err {
+                http_status: Some(401),
+                message: "Usage request failed (401)".into(),
+            },
+        );
+        assert_eq!(expired.status, "error");
+        assert_eq!(
+            expired.error.as_deref(),
+            Some("Command Code sign-in expired")
+        );
+
+        let failed = snapshot_from_fetch(
+            "3".into(),
+            "three".into(),
+            "k-three".into(),
+            "secret-3",
+            AccountUsageFetch::Err {
+                http_status: Some(500),
+                message: "Usage request failed (500)".into(),
+            },
+        );
+        assert!(failed.error.expect("error snapshot").contains("500"));
+    }
+
+    #[test]
+    fn collect_usage_covers_every_account_file() {
+        let root = sandbox("usage");
+        let dir = root.join("bin/accounts");
+        write_account(&root, "2", "two", "k-two");
+        write_account(&root, "10", "ten", "k-ten");
+        // No API key: still yields an error snapshot, never skipped silently.
+        std::fs::write(
+            dir.join("account3.json"),
+            r#"{"userName":"nokey","keyName":"k-none"}"#,
+        )
+        .unwrap();
+        // Not an account file: ignored.
+        std::fs::write(dir.join("notes.txt"), "hello").unwrap();
+
+        let snapshots = collect_accounts_usage(&dir, |api_key| {
+            assert!(!api_key.is_empty());
+            AccountUsageFetch::Ok {
+                http_status: 200,
+                body: usage_body().replace("7.5", api_key),
+            }
+        });
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].id, "2");
+        assert_eq!(snapshots[1].id, "3");
+        assert_eq!(snapshots[2].id, "10");
+        // The stub echoes the key inside the body; it must come back redacted.
+        for snapshot in [&snapshots[0], &snapshots[2]] {
+            assert_eq!(snapshot.status, "ok");
+            let json = serde_json::to_string(snapshot).unwrap();
+            assert!(!json.contains("secret-"));
+        }
+        assert_eq!(snapshots[1].status, "error");
+        assert!(snapshots[1].error.is_some());
     }
 }

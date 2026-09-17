@@ -347,6 +347,7 @@ pub fn run() {
             rate_limits::fetch_agy_usage,
             cmd_accounts::list_cmd_accounts,
             cmd_accounts::switch_cmd_account,
+            cmd_accounts::fetch_cmd_accounts_usage,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

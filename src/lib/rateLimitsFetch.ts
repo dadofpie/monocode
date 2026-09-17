@@ -47,6 +47,15 @@ export type CmdAccountSwitch = {
   userName: string;
 };
 
+export type CmdAccountUsageSnapshot = {
+  id: string;
+  userName: string;
+  keyName: string;
+  status: "ok" | "error" | string;
+  body: string | null;
+  error: string | null;
+};
+
 type ProviderUsageFetch = {
   status: "ok" | "error" | "unavailable" | string;
   httpStatus?: number | null;
@@ -118,6 +127,12 @@ export async function fetchCmdAccounts(): Promise<CmdAccountState> {
 
 export async function switchCmdAccount(id: string): Promise<CmdAccountSwitch> {
   return invoke<CmdAccountSwitch>("switch_cmd_account", { id });
+}
+
+export async function fetchCmdAccountsUsage(): Promise<
+  CmdAccountUsageSnapshot[]
+> {
+  return invoke<CmdAccountUsageSnapshot[]>("fetch_cmd_accounts_usage");
 }
 
 export async function fetchAgyRateLimits(): Promise<ProviderRateLimits> {  try {
