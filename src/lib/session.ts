@@ -464,6 +464,24 @@ export function hasPendingApproval(blocks: Block[]): boolean {
   return blocks.some((block) => block.approval && !block.approval.decided);
 }
 
+/**
+ * Session token totals for the footer usage chip.
+ *
+ * Harnesses attribute the running aggregate to the latest user turn (each
+ * `turn.metrics` event overwrites the previous one on that block), so the
+ * last user block carrying metrics already holds the session totals.
+ * Summing across blocks would multiply-count.
+ */
+export function latestUserTurnMetrics(
+  blocks: readonly Block[],
+): TurnMetrics | undefined {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.role === "user" && block.turnMetrics) return block.turnMetrics;
+  }
+  return undefined;
+}
+
 export function sessionNeedsInput(session: Session): boolean {
   return hasPendingApproval(session.blocks) || session.pendingQuestion != null;
 }

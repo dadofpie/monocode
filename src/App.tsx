@@ -267,6 +267,7 @@ import {
   HARNESS_TITLE,
   canReplaceSessionTitle,
   formatSessionTitle,
+  latestUserTurnMetrics,
   sessionNeedsInput,
   newDefaultSession,
   newSession,
@@ -1141,8 +1142,10 @@ export default function App({
       id: active.id,
       harness: active.harness,
       authRequired: latestTurnNeedsHarnessLogin(active.blocks),
+      turnMetrics: latestUserTurnMetrics(active.blocks),
+      context: active.context,
     };
-  }, [active?.id, active?.harness, active?.blocks]);
+  }, [active?.id, active?.harness, active?.blocks, active?.context]);
   const activeProviderSignInRequest = useMemo(() => {
     if (
       !active ||

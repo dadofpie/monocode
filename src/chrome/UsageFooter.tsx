@@ -32,6 +32,12 @@ import {
   type RateLimitProvider,
 } from "../lib/rateLimits";
 import { HARNESS_LABEL, HARNESS_TITLE, type HarnessId } from "../lib/session";
+import type { TurnMetrics } from "../lib/session";
+import {
+  contextPercent,
+  formatTokens,
+  type ContextUsage,
+} from "../lib/contextUsage";
 import { loginHarness, supportsHarnessLogin } from "../lib/harness/auth";
 import {
   runningTerminalChipLabel,
@@ -50,6 +56,10 @@ export type UsageFooterSession = {
   id?: string;
   harness: HarnessId;
   authRequired?: boolean;
+  /** Latest reported session token totals, for harnesses without provider billing. */
+  turnMetrics?: TurnMetrics;
+  /** Latest reported context-window level. */
+  context?: ContextUsage;
 };
 
 export function UsageFooter({
@@ -378,7 +388,12 @@ export function UsageFooter({
           </button>
         </>
       ) : session ? (
-        <SessionChip key={session.id ?? session.harness} session={session} />
+        <>
+          <SessionChip key={session.id ?? session.harness} session={session} />
+          {session.harness === "opencode" ? (
+            <SessionUsageChip session={session} />
+          ) : null}
+        </>
       ) : null}
       {showTerminals || showTerminalButton ? (
         <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -511,6 +526,199 @@ function SessionChip({ session }: { session: UsageFooterSession }) {
             error={loginError}
             onSignIn={() => void signIn()}
           />
+        </Popover>
+      ) : null}
+    </>
+  );
+}
+
+function sessionTokenTotal(metrics: TurnMetrics): number {
+  return (
+    (metrics.inputTokens ?? 0) +
+    (metrics.outputTokens ?? 0) +
+    (metrics.cacheReadTokens ?? 0) +
+    (metrics.cacheWriteTokens ?? 0)
+  );
+}
+
+/**
+ * Clickable session usage chip for harnesses without provider billing
+ * (OpenCode reports tokens per message, but OpenCode Go exposes no usage
+ * endpoint). Totals come from the harness-reported aggregates already stored
+ * on the session, so this needs no network at all.
+ */
+function SessionUsageChip({ session }: { session: UsageFooterSession }) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const metrics = session.turnMetrics;
+  const context = session.context;
+  const percent = contextPercent(context);
+  const total = metrics ? sessionTokenTotal(metrics) : 0;
+  const hasTokens = metrics != null && total > 0;
+  if (!hasTokens && percent == null) return null;
+
+  const label =
+    percent != null && hasTokens
+      ? `${percent}% · ${formatTokens(total)}`
+      : percent != null
+        ? `${percent}%`
+        : formatTokens(total);
+  const description =
+    percent != null && hasTokens
+      ? `${percent}% context · ${formatTokens(total)} tokens this session`
+      : percent != null
+        ? `${percent}% context used`
+        : `${formatTokens(total)} tokens this session`;
+
+  const dismiss = (reason: PopoverDismissReason) => {
+    setOpen(false);
+    if (reason === "escape") {
+      requestAnimationFrame(() => trigger.current?.focus());
+    }
+  };
+
+  const rows: Array<{ label: string; value: string }> = [];
+  if (metrics?.inputTokens) {
+    rows.push({ label: "Input", value: formatTokens(metrics.inputTokens) });
+  }
+  if (metrics?.outputTokens) {
+    rows.push({ label: "Output", value: formatTokens(metrics.outputTokens) });
+  }
+  if (metrics?.cacheReadTokens) {
+    rows.push({
+      label: "Cache read",
+      value: formatTokens(metrics.cacheReadTokens),
+    });
+  }
+  if (metrics?.cacheWriteTokens) {
+    rows.push({
+      label: "Cache write",
+      value: formatTokens(metrics.cacheWriteTokens),
+    });
+  }
+  if (metrics?.cacheHitPercent != null) {
+    rows.push({
+      label: "Cache hit",
+      value: `${Math.round(metrics.cacheHitPercent)}%`,
+    });
+  }
+
+  const barPct = percent ?? 0;
+  const remaining = Math.max(0, 100 - barPct);
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        className="-mx-1 inline-flex h-5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-1 text-content/55 transition-[background-color,color,transform] duration-150 ease-out hover:bg-content/10 hover:text-content focus-visible:outline-2 focus-visible:outline-accent active:scale-[0.97]"
+        aria-label="Session usage details"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        title={description}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <HarnessIcon harness={session.harness} className="size-3 shrink-0" />
+        <span className="tabular-nums">{label}</span>
+      </button>
+      {open ? (
+        <Popover
+          anchor={trigger}
+          side="top"
+          align="start"
+          gap={7}
+          width={300}
+          maxHeight={460}
+          autoFocus
+          onDismiss={dismiss}
+          role="dialog"
+          aria-label="Session usage details"
+          tabIndex={-1}
+          className="overflow-y-auto p-2.5 text-content"
+        >
+          <div className="flex items-start gap-2.5 px-1 pb-2.5 pt-0.5">
+            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-content/[0.06] ring-1 ring-inset ring-content/[0.07]">
+              <HarnessIcon harness={session.harness} className="size-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h2 className="text-[13px] font-medium leading-4">
+                Session usage
+              </h2>
+              <p className="mt-0.5 text-[10px] leading-4 text-content/40">
+                {description}
+              </p>
+            </div>
+          </div>
+
+          {context ? (
+            <section className="rounded-lg bg-content/[0.045] px-3 py-2.5 ring-1 ring-inset ring-content/[0.06]">
+              <div className="flex items-baseline justify-between gap-3">
+                <h3 className="text-[11px] font-medium text-content/65">
+                  Context window
+                </h3>
+                <span className="shrink-0 text-[11px] font-medium tabular-nums">
+                  {percent != null ? `${percent}% used` : "tracking"}
+                </span>
+              </div>
+              {percent != null ? (
+                <>
+                  <div
+                    className="mt-2 h-1.5 overflow-hidden rounded-full bg-content/10"
+                    role="progressbar"
+                    aria-label="Context window used"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={percent}
+                  >
+                    <span
+                      className={`block h-full rounded-full ${barPct >= 90 ? "bg-red-400" : barPct >= 80 ? "bg-amber-400" : "bg-content/45"}`}
+                      style={{ width: `${barPct}%` }}
+                    />
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between gap-3 text-[10px] leading-4 text-content/40">
+                    <span className="tabular-nums">{remaining}% remaining</span>
+                    <span className="truncate text-right tabular-nums">
+                      {context.window
+                        ? `${formatTokens(context.used)} / ${formatTokens(context.window)}`
+                        : `${formatTokens(context.used)} tokens`}
+                    </span>
+                  </div>
+                </>
+              ) : null}
+            </section>
+          ) : null}
+
+          {rows.length > 0 ? (
+            <section className="mt-1.5 rounded-lg bg-content/[0.045] px-3 py-2.5 ring-1 ring-inset ring-content/[0.06]">
+              <h3 className="text-[11px] font-medium text-content/65">
+                Tokens this session
+              </h3>
+              <dl className="mt-1.5 flex flex-col gap-1">
+                {rows.map((row) => (
+                  <div
+                    key={row.label}
+                    className="flex items-baseline justify-between gap-3 text-[10px] leading-4"
+                  >
+                    <dt className="text-content/40">{row.label}</dt>
+                    <dd className="shrink-0 font-medium tabular-nums">
+                      {row.value}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ) : null}
+
+          {!context && rows.length === 0 ? (
+            <div className="rounded-lg bg-content/[0.04] px-3 py-4 text-center ring-1 ring-inset ring-content/[0.06]">
+              <p className="text-[11px] font-medium text-content/65">
+                No usage reported yet
+              </p>
+              <p className="mx-auto mt-1 max-w-[15rem] text-[10px] leading-4 text-content/40">
+                Token counts appear here once the agent answers.
+              </p>
+            </div>
+          ) : null}
         </Popover>
       ) : null}
     </>
