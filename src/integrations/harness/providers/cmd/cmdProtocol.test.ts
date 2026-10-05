@@ -10,10 +10,15 @@ import {
   cmdPromptWithAttachments,
   cmdToolTitle,
   defaultModelFromCmdListOutput,
+  formatCmdErrorMessage,
+  formatCmdInlineAttachment,
+  isCmdInlineTextAttachment,
+  MAX_CMD_INLINE_CHARS,
   modelsFromCmdListOutput,
   parseCmdLine,
   resultStatusFromCmd,
   sessionIdFromCmdLine,
+  splitCmdAttachments,
   toolKindFromCmdName,
   toolRefFromCmdEvent,
 } from "./cmdProtocol";
@@ -213,6 +218,7 @@ describe("cmd protocol", () => {
   });
 
   it("sends pasted images as exact-read path references, never base64", () => {
+
     // cmd -p has no vision channel (verified against the CLI: markdown and
     // @-mention forms also resolve through a read_file tool call), so the
     // prompt must stay a short path reference and keep base64 out of argv.
@@ -239,5 +245,73 @@ describe("cmd protocol", () => {
       runtimeMode: "supervised",
     });
     expect(args.join("\n")).not.toContain(data);
+  });
+
+  it("inlines markdown/text attachments so no file part is created", () => {
+    const md: Attachment = {
+      id: "m",
+      name: "API.md",
+      mimeType: "text/markdown",
+      kind: "file",
+      size: 100,
+      path: "/tmp/API.md",
+    };
+    const pdf: Attachment = {
+      id: "p",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      kind: "file",
+      size: 100,
+      path: "/tmp/report.pdf",
+    };
+    const img: Attachment = {
+      id: "i",
+      name: "shot.png",
+      mimeType: "image/png",
+      kind: "image",
+      size: 100,
+      path: "/tmp/shot.png",
+    };
+    expect(isCmdInlineTextAttachment(md)).toBe(true);
+    expect(isCmdInlineTextAttachment(pdf)).toBe(false);
+    expect(isCmdInlineTextAttachment(img)).toBe(false);
+    expect(
+      isCmdInlineTextAttachment({ ...md, path: undefined }),
+    ).toBe(false);
+    const split = splitCmdAttachments([md, pdf, img]);
+    expect(split.inline.map((a) => a.id)).toEqual(["m"]);
+    expect(split.referenced.map((a) => a.id)).toEqual(["p", "i"]);
+  });
+
+  it("formats inlined markdown as a fenced block", () => {
+    const block = formatCmdInlineAttachment("API.md", "text/markdown", "# API\nbody\n");
+    expect(block).toContain('Attached file "API.md"');
+    expect(block).toContain("do not send this as a file part");
+    expect(block).toContain("```md\n# API\nbody\n```");
+  });
+
+  it("escapes fences and truncates oversized inline content", () => {
+    const tricky = "a\n```\ncode\n```\nb";
+    const block = formatCmdInlineAttachment("n.md", "text/markdown", tricky);
+    expect(block).toContain("````md\n");
+    expect(block).toContain("\n````");
+    expect(block).not.toMatch(/\n```md\n/);
+    const big = "x".repeat(MAX_CMD_INLINE_CHARS + 10);
+    const cut = formatCmdInlineAttachment("big.md", "text/markdown", big);
+    expect(cut).toContain("truncated 10 chars");
+    expect(cut.length).toBeLessThan(big.length + 500);
+  });
+
+  it("translates CLI-surfaced backend failures into actionable errors", () => {
+    expect(
+      formatCmdErrorMessage(
+        "'file part media type text/markdown' functionality not supported.",
+      ),
+    ).toContain("doesn't accept text/markdown file attachments");
+    expect(
+      formatCmdErrorMessage(
+        "Failed to read OpenCode response: response too big for into-string",
+      ),
+    ).toContain("too large");
   });
 });

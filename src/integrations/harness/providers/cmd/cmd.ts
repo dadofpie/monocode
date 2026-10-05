@@ -1,7 +1,11 @@
 import { nativeModelId } from "../../../../features/sessions/model/models";
-import type { RuntimeMode } from "../../../../features/sessions/model/session";
+import type {
+  Attachment,
+  RuntimeMode,
+} from "../../../../features/sessions/model/session";
 import {
   killChild,
+  readHarnessTextFile,
   resolveCmdBinary,
   spawnChild,
   unwatchChild,
@@ -16,10 +20,12 @@ import {
   cmdPreviewFromTool,
   cmdToolTitle,
   formatCmdErrorMessage,
+  formatCmdInlineAttachment,
   isCmdTransientNetworkError,
   parseCmdLine,
   resultStatusFromCmd,
   sessionIdFromCmdLine,
+  splitCmdAttachments,
   strField,
   summarizeCmdTool,
   toolKindFromCmdName,
@@ -172,6 +178,39 @@ function ensureCmdLive(input: SendTurnInput): Live {
 
 const MAX_NETWORK_RETRIES = 2;
 
+/**
+ * Text attachments (markdown, docs, code) are inlined into the prompt so the
+ * `cmd` CLI never forwards them to its backend as file parts (which rejects
+ * types like text/markdown). Unreadable files fall back to path references.
+ */
+async function prepareCmdPrompt(
+  text: string,
+  attachments?: Attachment[],
+): Promise<{ text: string; attachments?: Attachment[] }> {
+  if (!attachments || attachments.length === 0) return { text, attachments };
+  const { inline, referenced } = splitCmdAttachments(attachments);
+  if (inline.length === 0) return { text, attachments };
+  const blocks: string[] = [];
+  const failed: Attachment[] = [];
+  for (const attachment of inline) {
+    try {
+      const content = await readHarnessTextFile(attachment.path ?? "");
+      blocks.push(
+        formatCmdInlineAttachment(attachment.name, attachment.mimeType, content),
+      );
+    } catch {
+      // Fall through: the path reference still gives the agent a way
+      // to read the file with its own tools.
+      failed.push(attachment);
+    }
+  }
+  const inlined = blocks.join("\n\n");
+  return {
+    text: inlined && text.trim() ? `${text}\n\n${inlined}` : `${text}${inlined}`,
+    attachments: [...referenced, ...failed],
+  };
+}
+
 async function runCmdTurn(live: Live, input: SendTurnInput): Promise<void> {
   let attempt = 0;
   while (true) {
@@ -218,9 +257,10 @@ async function runCmdTurnOnce(live: Live, input: SendTurnInput): Promise<void> {
     live.onEvent({ type: "session.started" });
   }
 
+  const prompt = await prepareCmdPrompt(input.text, input.attachments);
   const args = buildCmdSpawnArgs({
-    text: input.text,
-    attachments: input.attachments,
+    text: prompt.text,
+    attachments: prompt.attachments,
     model: nativeModelId(input.model),
     effort: input.modelSettings?.effort,
     resume: live.cmdSessionId,

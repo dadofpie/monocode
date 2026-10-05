@@ -115,6 +115,87 @@ export function cmdPromptWithAttachments(input: {
   return [input.text, ...paths].filter((part) => part.trim()).join("\n\n");
 }
 
+/**
+ * The `cmd` CLI forwards referenced files to its OpenCode backend as file
+ * parts, and that backend rejects some media types outright (observed:
+ * `text/markdown` → "'file part media type text/markdown' functionality not
+ * supported"). Text attachments are therefore inlined into the prompt as
+ * fenced blocks so no file part is ever created for them. Images, folders,
+ * audio/video, and opaque binaries keep traveling as path references.
+ */
+export const MAX_CMD_INLINE_CHARS = 50_000;
+
+const CMD_INLINE_MIMES = new Set([
+  "application/json",
+  "application/xml",
+  "application/sql",
+  "application/graphql",
+  "application/toml",
+]);
+
+export function isCmdInlineTextAttachment(attachment: Attachment): boolean {
+  if (attachment.kind !== "file") return false;
+  if (!attachment.path?.trim()) return false;
+  const mime = attachment.mimeType.toLowerCase();
+  if (mime === "inode/directory") return false;
+  if (mime.startsWith("audio/") || mime.startsWith("video/")) return false;
+  return mime.startsWith("text/") || CMD_INLINE_MIMES.has(mime);
+}
+
+/** Split attachments into text to inline vs. references that stay path lines. */
+export function splitCmdAttachments(attachments: Attachment[]): {
+  inline: Attachment[];
+  referenced: Attachment[];
+} {
+  const inline: Attachment[] = [];
+  const referenced: Attachment[] = [];
+  for (const attachment of attachments ?? []) {
+    (isCmdInlineTextAttachment(attachment) ? inline : referenced).push(
+      attachment,
+    );
+  }
+  return { inline, referenced };
+}
+
+function cmdInlineFence(language: string, content: string): string {
+  let longest = 0;
+  const runs = content.match(/`+/g);
+  if (runs) {
+    for (const run of runs) longest = Math.max(longest, run.length);
+  }
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  const tag = language ? fence + language : fence;
+  return `${tag}\n${content}\n${fence}`;
+}
+
+function cmdInlineLanguage(name: string, mime: string): string {
+  const dot = name.toLowerCase().lastIndexOf(".");
+  const ext = dot > 0 ? name.toLowerCase().slice(dot + 1) : "";
+  if (ext) return ext;
+  if (mime === "application/json") return "json";
+  if (mime === "application/xml") return "xml";
+  if (mime === "application/sql") return "sql";
+  return "text";
+}
+
+/** Render one inlined text attachment as a fenced block with truncation. */
+export function formatCmdInlineAttachment(
+  name: string,
+  mime: string,
+  content: string,
+): string {
+  const trimmed = content.replace(/\s+$/, "");
+  const truncated = trimmed.length > MAX_CMD_INLINE_CHARS;
+  const body = truncated
+    ? `${trimmed.slice(0, MAX_CMD_INLINE_CHARS)}\n…[truncated ${trimmed.length - MAX_CMD_INLINE_CHARS} chars]`
+    : trimmed;
+  const quoted = JSON.stringify(name);
+  return (
+    `Attached file ${quoted} (contents inlined below — do not send this as a file part):\n` +
+    cmdInlineFence(cmdInlineLanguage(name, mime.toLowerCase()), body)
+  );
+}
+
 export function sessionIdFromCmdLine(rec: Record<string, unknown>): string | undefined {
   const event = cmdEvent(rec);
   if (event) {
@@ -311,6 +392,22 @@ export function formatCmdErrorMessage(rawError: string): string {
   const trimmed = rawError.trim();
   if (isCmdTransientNetworkError(trimmed)) {
     return `CommandCode network error: ${trimmed}`;
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower.includes("response too big for into-string")) {
+    return (
+      "CommandCode couldn't read the provider response because it was too large. " +
+      "Try again with smaller attachments or split the request into parts."
+    );
+  }
+  const unsupported = lower.match(
+    /file part media type\s+([^\s'"`]+).*functionality not supported/,
+  );
+  if (unsupported) {
+    return (
+      `CommandCode's backend doesn't accept ${unsupported[1]} file attachments. ` +
+      "The file was sent as text instead — retry the turn and it should go through."
+    );
   }
   return trimmed;
 }
