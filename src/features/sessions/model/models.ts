@@ -199,6 +199,20 @@ export const MODELS: AgentModel[] = [
     harness: "cmd",
     name: "Muse Spark 1.3 Contributor",
     nativeId: "meta/muse-spark-1.3-contributor",
+    settings: [
+      {
+        id: "effort",
+        label: "Reasoning",
+        kind: "select",
+        value: "xhigh",
+        options: [
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High" },
+          { value: "xhigh", label: "Extra High" },
+        ],
+      },
+    ],
   },
   {
     id: "antigravity:gemini-3.8-flash-high",

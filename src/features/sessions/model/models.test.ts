@@ -268,8 +268,8 @@ describe("provider defaults", () => {
     saveLastModelChoice("claude", "claude:opus-5");
     setProjectProviderHidden("/repo/a", "claude", true);
     expect(defaultSessionChoice("/repo/a")).toEqual({
-      harness: "codex",
-      model: defaultModelId("codex"),
+      harness: "cmd",
+      model: defaultModelId("cmd"),
     });
     expect(defaultSessionChoice("/repo/b")).toEqual({
       harness: "claude",
