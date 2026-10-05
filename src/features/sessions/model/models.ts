@@ -195,6 +195,12 @@ export const MODELS: AgentModel[] = [
     nativeId: "",
   },
   {
+    id: "cmd:meta/muse-spark-1.3-contributor",
+    harness: "cmd",
+    name: "Muse Spark 1.3 Contributor",
+    nativeId: "meta/muse-spark-1.3-contributor",
+  },
+  {
     id: "antigravity:gemini-3.8-flash-high",
     harness: "antigravity",
     name: "Gemini 3.8 Flash (High)",
@@ -210,6 +216,7 @@ export const MODELS: AgentModel[] = [
 
 export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
   claude: "claude:sonnet-5",
+  cmd: "cmd:meta/muse-spark-1.3-contributor",
   codex: "",
   cursor: "cursor:composer-2.5",
   grok: "grok:grok-4.6",
@@ -240,6 +247,7 @@ export type LastModelChoice = {
 
 const HARNESS_ORDER: HarnessId[] = [
   "claude",
+  "cmd",
   "codex",
   "cursor",
   "grok",

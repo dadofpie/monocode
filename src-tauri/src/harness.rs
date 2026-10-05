@@ -877,6 +877,18 @@ pub fn harness_resolve_devin() -> Result<CursorBinary, String> {
         })
 }
 
+/// Resolve the CommandCode CLI (`cmd`).
+#[tauri::command(async)]
+pub fn harness_resolve_cmd() -> Result<CursorBinary, String> {
+    resolve_cmd()
+        .map(|path| CursorBinary {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .ok_or_else(|| {
+            "CommandCode CLI not found. Install it with `npm install -g command-code` and run `cmd login`, then retry.".into()
+        })
+}
+
 /// Antigravity's ACP server is separate from the interactive agy CLI.
 #[tauri::command(async)]
 pub fn harness_resolve_antigravity() -> Result<AntigravityBinary, String> {
@@ -1840,6 +1852,7 @@ fn is_harness_argv_token(part: &str) -> bool {
             | "fx"
             | "hermes"
             | "devin"
+            | "cmd"
             | "agy_acp_server.par"
             | "pi"
             | "worker-server"
@@ -2079,6 +2092,7 @@ fn resolve_harness_binary_default(provider: &str) -> Option<PathBuf> {
         "omp" => resolve_omp(),
         "fx" => resolve_fx(),
         "hermes" => resolve_hermes(),
+        "cmd" => resolve_cmd(),
         "antigravity" => resolve_antigravity(),
         "devin" => resolve_devin(),
         _ => None,
@@ -2125,6 +2139,7 @@ fn resolve_harness_binary_override(provider: &str, binary_path: &str) -> Result<
         "omp" => &["omp"],
         "fx" => &["fx"],
         "hermes" => &["hermes"],
+        "cmd" => &["cmd"],
         "antigravity" => &["agy_acp_server.par"],
         "devin" => &["devin"],
         _ => {
@@ -2513,6 +2528,34 @@ fn resolve_devin() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/devin"));
     candidates.push(PathBuf::from("/usr/bin/devin"));
     if let Some(from_shell) = which_via_login_shell("devin") {
+        candidates.push(from_shell);
+    }
+
+    first_binary(candidates)
+}
+
+fn resolve_cmd() -> Option<PathBuf> {
+    let home = dirs_home().map(PathBuf::from);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(home) = &home {
+        candidates.push(home.join(".local/bin/cmd"));
+        candidates.push(home.join(".local/bin/command-code"));
+        candidates.push(home.join(".npm-global/bin/cmd"));
+        candidates.push(home.join(".npm-global/bin/command-code"));
+        candidates.push(home.join(".cargo/bin/cmd"));
+        candidates.push(home.join("n/bin/cmd"));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin/cmd"));
+    candidates.push(PathBuf::from("/usr/local/bin/cmd"));
+    candidates.push(PathBuf::from("/usr/bin/cmd"));
+    candidates.push(PathBuf::from("/snap/bin/cmd"));
+    if let Some(from_shell) = which_via_login_shell("cmd") {
+        candidates.push(from_shell);
+    }
+    // `command-code` is the long-name launcher shipped by the npm package.
+    if let Some(from_shell) = which_via_login_shell("command-code") {
         candidates.push(from_shell);
     }
 

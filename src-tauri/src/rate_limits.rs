@@ -44,6 +44,112 @@ pub struct OpencodeGoUsageFetch {
 
 const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CmdUsageFetch {
+    pub status: String,
+    pub http_status: Option<u16>,
+    pub body: Option<String>,
+    pub error: Option<String>,
+}
+
+pub(crate) const CMD_CREDITS_URL: &str = "https://api.commandcode.ai/alpha/billing/credits";
+
+fn cmd_usage_result(
+    status: &str,
+    http_status: Option<u16>,
+    body: Option<String>,
+    error: Option<String>,
+) -> CmdUsageFetch {
+    CmdUsageFetch {
+        status: status.into(),
+        http_status,
+        body,
+        error,
+    }
+}
+
+/// Fetch Command Code 5-hour / weekly window limits and credits via ~/.commandcode/auth.json.
+#[tauri::command]
+pub async fn fetch_cmd_usage() -> Result<CmdUsageFetch, String> {
+    tauri::async_runtime::spawn_blocking(fetch_cmd_usage_sync)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fetch_cmd_usage_sync() -> Result<CmdUsageFetch, String> {
+    let Some(api_key) = read_cmd_api_key() else {
+        return Ok(cmd_usage_result(
+            "unavailable",
+            None,
+            None,
+            Some("Command Code not signed in".into()),
+        ));
+    };
+
+    let agent = ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build();
+    let result = agent
+        .get(CMD_CREDITS_URL)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("User-Agent", USER_AGENT)
+        .call();
+
+    match result {
+        Ok(response) => {
+            let http_status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            if (200..300).contains(&http_status) {
+                Ok(cmd_usage_result("ok", Some(http_status), Some(body), None))
+            } else {
+                Ok(cmd_usage_result(
+                    "error",
+                    Some(http_status),
+                    None,
+                    Some(format!("Command Code usage request failed ({http_status})")),
+                ))
+            }
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let _ = response.into_string();
+            let message = if status == 401 {
+                "Command Code sign-in expired".into()
+            } else {
+                format!("Command Code usage request failed ({status})")
+            };
+            Ok(cmd_usage_result("error", Some(status), None, Some(message)))
+        }
+        Err(error) => Ok(cmd_usage_result(
+            "error",
+            None,
+            None,
+            Some(format!("Command Code usage request failed: {error}")),
+        )),
+    }
+}
+
+pub(crate) fn cmd_auth_path() -> Option<PathBuf> {
+    let home = dirs_home().or_else(|| {
+        std::env::var_os("USERPROFILE").map(|value| value.to_string_lossy().into_owned())
+    })?;
+    Some(PathBuf::from(home).join(".commandcode/auth.json"))
+}
+
+pub(crate) fn extract_cmd_api_key(raw: &str) -> Option<String> {
+    let val: Value = serde_json::from_str(raw.trim()).ok()?;
+    let key = val.get("apiKey").and_then(Value::as_str)?.trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
+}
+
+fn read_cmd_api_key() -> Option<String> {
+    let path = cmd_auth_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    extract_cmd_api_key(&raw)
+}
+
 /// Fetch OpenCode Go 5h / weekly / monthly usage via the local Go API key.
 /// Runs in the host process so the webview CORS policy does not apply.
 /// The key never leaves the host process.
@@ -826,5 +932,18 @@ mod tests {
             "Claude Code-credentials-902e721c"
         );
         assert_eq!(claude_keychain_service(None), "Claude Code-credentials");
+    }
+
+    #[test]
+    fn extract_cmd_api_key_reads_key() {
+        let raw = r#"{"apiKey":"user_123456","userName":"alice"}"#;
+        assert_eq!(extract_cmd_api_key(raw).as_deref(), Some("user_123456"));
+    }
+
+    #[test]
+    fn extract_cmd_api_key_rejects_empty() {
+        let raw = r#"{"apiKey":"  ","userName":"alice"}"#;
+        assert_eq!(extract_cmd_api_key(raw), None);
+        assert_eq!(extract_cmd_api_key("not json"), None);
     }
 }
