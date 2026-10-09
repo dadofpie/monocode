@@ -70,6 +70,8 @@ export async function runCmdTextPrompt(input: {
         noSession: true,
       }),
       input.cwd,
+      undefined,
+      "cmd",
     );
     await done;
   } finally {

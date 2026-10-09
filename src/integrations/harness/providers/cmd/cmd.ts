@@ -303,7 +303,9 @@ async function runCmdTurnOnce(live: Live, input: SendTurnInput): Promise<void> {
   );
 
   try {
-    await spawnChild(input.sessionId, path, args, input.cwd);
+    // The provider tag is required: the backend only spawns resolved
+    // harness CLIs (provider-less spawns are rejected).
+    await spawnChild(input.sessionId, path, args, input.cwd, undefined, "cmd");
     await turnPromise;
   } catch (error) {
     if (live.cancelled) return;

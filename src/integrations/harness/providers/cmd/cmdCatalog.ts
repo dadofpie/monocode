@@ -26,7 +26,9 @@ export function refreshCmdCatalog(): Promise<void> {
 async function discoverCmdModels() {
   const { path } = await resolveCmdBinary();
   const cwd = await homeDir();
-  const output = await execChild(path, ["--list-models"], cwd);
+  // The provider tag is required: the backend only runs catalog probes
+  // against a resolved harness CLI (provider-less exec is rejected).
+  const output = await execChild(path, ["--list-models"], cwd, "cmd");
   const models = modelsFromCmdListOutput(output);
   // Prefer the CLI-flagged default so a fresh catalog keeps working.
   const preferred = defaultModelFromCmdListOutput(output);
