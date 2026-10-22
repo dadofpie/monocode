@@ -266,7 +266,7 @@ export async function attachmentsFromFiles(
   const blobs: File[] = [];
   for (const file of files) {
     const path = nativePath(file);
-    if (path && !options?.snapshot && !isVolatileSourcePath(path)) {
+    if (path && (!options?.snapshot || !isVolatileSourcePath(path))) {
       pathFiles.push(path);
     } else {
       blobs.push(file);
@@ -426,11 +426,10 @@ async function attachmentFromBlob(file: File): Promise<Attachment | null> {
   const name = file.name.trim() || fallbackName(mimeType);
   const previewUrl = kind === "image" ? URL.createObjectURL(file) : undefined;
   const data = await readBlobBase64(file);
-  if (!data) {
+  if (data === null) {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     return null;
   }
-  const path = await persistAttachmentBytes(name, data);
   if (kind === "image" && isVisionImage(mimeType)) {
     return {
       id: crypto.randomUUID(),
@@ -440,22 +439,27 @@ async function attachmentFromBlob(file: File): Promise<Attachment | null> {
       size: file.size,
       data,
       previewUrl,
-      ...(path ? { path } : {}),
     };
   }
-  if (!path) {
+  try {
+    const path = await invoke<string>("write_attachment", { name, data });
+    if (!path.trim()) {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      return null;
+    }
+    return {
+      id: crypto.randomUUID(),
+      name,
+      mimeType,
+      kind,
+      size: file.size,
+      path,
+      previewUrl,
+    };
+  } catch {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     return null;
   }
-  return {
-    id: crypto.randomUUID(),
-    name,
-    mimeType,
-    kind,
-    size: file.size,
-    path,
-    previewUrl,
-  };
 }
 
 async function persistAttachmentBytes(
