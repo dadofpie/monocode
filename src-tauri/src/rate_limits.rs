@@ -259,10 +259,17 @@ fn env_var(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The Go key lives at `auth.json -> "opencode-go" -> "key"` inside the
-/// OpenCode data directory. Resolution mirrors OpenCode's own precedence:
-/// the `OPENCODE_AUTH_CONTENT` blob, then an explicit provider key in
-/// opencode config, then stored credentials on disk.
+/// Resolve the OpenCode Go API key. Resolution mirrors OpenCode's own
+/// precedence, with storage generations in order:
+/// 1. the `OPENCODE_AUTH_CONTENT` blob,
+/// 2. an explicit provider key in opencode config,
+/// 3. the active credential in OpenCode 2's SQLite store,
+/// 4. legacy `auth.json -> "opencode-go" -> "key"` credentials.
+///
+/// OpenCode 2 moved credentials into `opencode.db` and left `auth.json`
+/// behind. Reading the old file first marked a live subscription as expired
+/// while `opencode` itself kept working, so the database is authoritative
+/// whenever it has an active credential.
 fn read_opencode_go_api_key() -> Option<String> {
     // Env-injected auth blob is authoritative when it parses: a valid blob
     // without opencode-go means "no key", not "look elsewhere".
@@ -276,26 +283,85 @@ fn read_opencode_go_api_key() -> Option<String> {
     if let Some(key) = read_opencode_config_api_key() {
         return Some(key);
     }
+    if let Some(key) = opencode_db_paths()
+        .iter()
+        .find_map(|path| read_opencode_go_db_key(path))
+    {
+        return Some(key);
+    }
     let primary = opencode_data_dir()?.join("auth.json");
     let raw = std::fs::read_to_string(&primary)
         .or_else(|_| {
             // Legacy macOS location.
-            dirs_home()
-                .or_else(|| {
-                    std::env::var_os("USERPROFILE")
-                        .map(|value| value.to_string_lossy().into_owned())
-                })
-                .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
-                })
-                .and_then(|home| {
-                    std::fs::read_to_string(
-                        PathBuf::from(home).join("Library/Application Support/opencode/auth.json"),
-                    )
+            legacy_macos_opencode_dir()
+                .map(|dir| std::fs::read_to_string(dir.join("auth.json")))
+                .unwrap_or_else(|| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no home directory",
+                    ))
                 })
         })
         .ok()?;
     extract_opencode_go_api_key(&raw)
+}
+
+fn legacy_macos_opencode_dir() -> Option<PathBuf> {
+    dirs_home()
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|value| value.to_string_lossy().into_owned())
+        })
+        .map(|home| PathBuf::from(home).join("Library/Application Support/opencode"))
+}
+
+/// OpenCode 2 stores every credential in one SQLite file. The current data
+/// directory wins; the legacy macOS location stays as a read-only fallback.
+fn opencode_db_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = opencode_data_dir() {
+        paths.push(dir.join("opencode.db"));
+    }
+    if let Some(dir) = legacy_macos_opencode_dir() {
+        let legacy = dir.join("opencode.db");
+        if !paths.contains(&legacy) {
+            paths.push(legacy);
+        }
+    }
+    paths
+}
+
+/// Read the active `opencode-go` credential from the OpenCode 2 database.
+/// Read-only access keeps the CLI free to own and rotate the database; a
+/// missing table (OpenCode 1 or an old database) simply falls through.
+fn read_opencode_go_db_key(path: &std::path::Path) -> Option<String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = connection.busy_timeout(Duration::from_millis(750));
+    query_opencode_go_db_key(&connection)
+}
+
+fn query_opencode_go_db_key(connection: &rusqlite::Connection) -> Option<String> {
+    let raw: String = connection
+        .query_row(
+            "SELECT value FROM credential \
+             WHERE integration_id = 'opencode-go' AND active = 1 \
+             ORDER BY time_updated DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let key = value.get("key")?.as_str()?.trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }
 
 /// Explicit `provider.options.apiKey` for the Go provider in opencode
@@ -815,6 +881,52 @@ mod tests {
             extract_opencode_go_api_key(raw).as_deref(),
             Some("sk-go-abc")
         );
+    }
+
+    #[test]
+    fn query_opencode_go_db_key_prefers_the_active_credential() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE credential (
+                    id TEXT PRIMARY KEY,
+                    integration_id TEXT,
+                    label TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    active INTEGER,
+                    time_updated INTEGER NOT NULL
+                );
+                INSERT INTO credential VALUES
+                    ('old', 'opencode-go', 'API key', '{\"type\":\"api\",\"key\":\"sk-stale\"}', 0, 1),
+                    ('live', 'opencode-go', 'OpenCode Go', '{\"type\":\"api\",\"key\":\"oc_sk_live\"}', 1, 2),
+                    ('other', 'opencode', 'Console', '{\"type\":\"api\",\"key\":\"sk-console\"}', 1, 3);",
+            )
+            .unwrap();
+        assert_eq!(
+            query_opencode_go_db_key(&connection).as_deref(),
+            Some("oc_sk_live")
+        );
+    }
+
+    #[test]
+    fn query_opencode_go_db_key_ignores_inactive_and_other_providers() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE credential (
+                    id TEXT PRIMARY KEY,
+                    integration_id TEXT,
+                    label TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    active INTEGER,
+                    time_updated INTEGER NOT NULL
+                );
+                INSERT INTO credential VALUES
+                    ('old', 'opencode-go', 'API key', '{\"type\":\"api\",\"key\":\"sk-stale\"}', 0, 1),
+                    ('other', 'opencode', 'Console', '{\"type\":\"api\",\"key\":\"sk-console\"}', 1, 2);",
+            )
+            .unwrap();
+        assert_eq!(query_opencode_go_db_key(&connection), None);
     }
 
     #[test]
