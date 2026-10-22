@@ -62,6 +62,16 @@ describe("cmd protocol", () => {
     ]);
   });
 
+  it("builds plan turns read-only instead of granting runtime permissions", () => {
+    const args = buildCmdSpawnArgs({
+      text: "plan this",
+      runtimeMode: "full-access",
+      plan: true,
+    });
+    expect(args).toContain("--plan");
+    expect(args).not.toContain("--yolo");
+  });
+
   it("resumes follow-ups by provider session id", () => {
     const args = buildCmdSpawnArgs({
       text: "again",

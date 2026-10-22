@@ -348,6 +348,7 @@ async function runCmdTurnOnce(
     resume: resumeId,
     maxTurns: MAX_TURNS_PER_RUN,
     runtimeMode: input.runtimeMode,
+    plan: input.intent === "plan",
   });
 
   const turnPromise = new Promise<void>((resolve, reject) => {

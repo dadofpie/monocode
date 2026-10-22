@@ -25,6 +25,8 @@ export type CmdSpawnInput = {
   resume?: string;
   maxTurns?: number;
   runtimeMode: RuntimeMode;
+  /** Read-only plan turn: `--plan` instead of the runtime-mode permissions. */
+  plan?: boolean;
   /** Helper calls (titles, commit messages): no persistence, no onboarding. */
   noSession?: boolean;
   attachments?: Attachment[];
@@ -163,7 +165,11 @@ export function buildCmdSpawnArgs(input: CmdSpawnInput): string[] {
     args.push("--resume", input.resume);
   }
   args.push("--skip-onboarding", "--trust");
-  args.push(...cmdModeArgs(input.runtimeMode));
+  if (input.plan) {
+    args.push("--plan");
+  } else {
+    args.push(...cmdModeArgs(input.runtimeMode));
+  }
   const model = input.model?.trim();
   if (model) args.push("--model", model);
   const effort = input.effort?.trim();
