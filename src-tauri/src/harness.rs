@@ -4380,6 +4380,21 @@ mod reap_logic_tests {
     }
 
     #[test]
+    fn should_reap_legacy_cursor_acp_orphaned_to_launchd() {
+        let args = "/Users/n/.local/bin/cursor-agent --use-system-ca /Users/n/index.js acp";
+        assert!(should_reap_process(&row(10, 1, args, None), 42, |_| false));
+        assert!(!should_reap_process(&row(10, 42, args, None), 42, |_| true));
+        assert!(!is_legacy_orphaned_cursor_acp(
+            "node /usr/local/bin/typescript-language-server --stdio"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod command_code_tests {
+    use super::*;
+
+    #[test]
     fn command_code_candidates_reject_the_windows_shell() {
         #[cfg(windows)]
         {
