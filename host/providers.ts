@@ -9,6 +9,7 @@ import * as fx from "../src/integrations/harness/providers/fx/fx";
 import * as hermes from "../src/integrations/harness/providers/hermes/hermes";
 import * as antigravity from "../src/integrations/harness/providers/antigravity/antigravity";
 import * as devin from "../src/integrations/harness/providers/devin/devin";
+import * as cmd from "../src/integrations/harness/providers/cmd/cmd";
 import type {
   SendTurnInput,
   CompactContextInput,
@@ -160,6 +161,14 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
       devin
         .waitForDevinSessionTitle(sessionId)
         .then((title) => (title ? { title, workItem: null } : null)),
+  },
+  cmd: {
+    send: cmd.sendCmdTurn,
+    cancel: cmd.cancelCmdTurn,
+    stop: cmd.forgetCmdSession,
+    bind: cmd.bindCmdSession,
+    approve: cmd.respondCmdApproval,
+    answer: unsupportedQuestion,
   },
 };
 

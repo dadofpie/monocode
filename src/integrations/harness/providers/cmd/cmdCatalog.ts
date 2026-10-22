@@ -23,9 +23,9 @@ export function refreshCmdCatalog(): Promise<void> {
   return inflight;
 }
 
-async function discoverCmdModels() {
+export async function discoverCmdModels(workingDirectory?: string) {
   const { path } = await resolveCmdBinary();
-  const cwd = await homeDir();
+  const cwd = workingDirectory ?? (await homeDir());
   // The provider tag is required: the backend only runs catalog probes
   // against a resolved harness CLI (provider-less exec is rejected).
   const output = await execChild(path, ["--list-models"], cwd, "cmd");

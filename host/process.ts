@@ -8,6 +8,8 @@ import type { RemoteProvider } from "../src/features/connections/model/protocol"
 const npmEntries: Record<string, string> = {
   codex: "node_modules/@openai/codex/bin/codex.js",
   claude: "node_modules/@anthropic-ai/claude-code/cli.js",
+  cmd: "node_modules/command-code/dist/index.mjs",
+  "command-code": "node_modules/command-code/dist/index.mjs",
 };
 
 const binaryNames: Record<RemoteProvider, string[]> = {
@@ -22,6 +24,7 @@ const binaryNames: Record<RemoteProvider, string[]> = {
   hermes: ["hermes"],
   antigravity: ["agy_acp_server.par"],
   devin: ["devin"],
+  cmd: ["cmd", "command-code"],
 };
 
 const providerDirectories = (provider: RemoteProvider): string[] => {
