@@ -2313,7 +2313,7 @@ fn resolve_codex() -> Option<PathBuf> {
     first_binary(candidates)
 }
 
-fn resolve_opencode() -> Option<PathBuf> {
+pub(crate) fn resolve_opencode() -> Option<PathBuf> {
     let home = dirs_home().map(PathBuf::from);
     let mut candidates: Vec<PathBuf> = Vec::new();
 

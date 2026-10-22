@@ -289,6 +289,11 @@ fn read_opencode_go_api_key() -> Option<String> {
     {
         return Some(key);
     }
+    // The database can be briefly locked while the CLI checkpoints its WAL.
+    // Ask OpenCode itself before falling back to the stale v1 file.
+    if let Some(key) = read_opencode_go_cli_key() {
+        return Some(key);
+    }
     let primary = opencode_data_dir()?.join("auth.json");
     let raw = std::fs::read_to_string(&primary)
         .or_else(|_| {
@@ -341,7 +346,7 @@ fn read_opencode_go_db_key(path: &std::path::Path) -> Option<String> {
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
-    let _ = connection.busy_timeout(Duration::from_millis(750));
+    let _ = connection.busy_timeout(Duration::from_millis(2_000));
     query_opencode_go_db_key(&connection)
 }
 
@@ -362,6 +367,55 @@ fn query_opencode_go_db_key(connection: &rusqlite::Connection) -> Option<String>
     } else {
         Some(key.to_string())
     }
+}
+
+/// Ask the installed CLI for its active credential. `opencode auth export`
+/// reads through the same store the running app uses, including any busy WAL
+/// state that a direct read might miss.
+fn read_opencode_go_cli_key() -> Option<String> {
+    let path = crate::harness::resolve_opencode()?;
+    let args = vec![
+        "auth".to_string(),
+        "export".to_string(),
+        "opencode-go".to_string(),
+    ];
+    let output = crate::harness::exec_output(
+        &path.to_string_lossy(),
+        &args,
+        None,
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    extract_active_opencode_go_key(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `opencode auth export` returns an array of credential records; choose the
+/// active `opencode-go` entry rather than the first stale export.
+fn extract_active_opencode_go_key(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw.trim()).ok()?;
+    for item in value.as_array()? {
+        let Some(record) = item.as_object() else {
+            continue;
+        };
+        if record.get("integrationID").and_then(Value::as_str) != Some("opencode-go") {
+            continue;
+        }
+        if record.get("active").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let key = record
+            .get("value")
+            .and_then(|value| value.get("key"))
+            .and_then(Value::as_str)?
+            .trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+    None
 }
 
 /// Explicit `provider.options.apiKey` for the Go provider in opencode
@@ -1025,6 +1079,21 @@ mod tests {
         );
         assert_eq!(read_opencode_go_api_key(), None);
         std::env::remove_var("OPENCODE_AUTH_CONTENT");
+    }
+
+    #[test]
+    fn extract_active_opencode_go_key_from_cli_export() {
+        let raw = r#"[
+            {"integrationID":"opencode-go","active":false,"value":{"type":"api","key":"sk-stale"}},
+            {"integrationID":"opencode","active":true,"value":{"type":"api","key":"oc_sk_console"}},
+            {"integrationID":"opencode-go","active":true,"value":{"type":"api","key":"oc_sk_live"}}
+        ]"#;
+        assert_eq!(
+            extract_active_opencode_go_key(raw).as_deref(),
+            Some("oc_sk_live")
+        );
+        assert_eq!(extract_active_opencode_go_key("[]"), None);
+        assert_eq!(extract_active_opencode_go_key("not json"), None);
     }
 
     #[test]
