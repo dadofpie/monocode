@@ -24,7 +24,7 @@ const binaryNames: Record<RemoteProvider, string[]> = {
   hermes: ["hermes"],
   antigravity: ["agy_acp_server.par"],
   devin: ["devin"],
-  cmd: ["cmd", "command-code"],
+  cmd: ["command-code", "cmd"],
 };
 
 const providerDirectories = (provider: RemoteProvider): string[] => {
@@ -85,6 +85,17 @@ async function matchesProvider(
     return fileContains(candidate, ["cursor-agent"], 64 * 1024);
   }
   if (provider === "pi" && name === "pi") return isPiLaunchCandidate(candidate);
+  if (provider === "cmd") {
+    // On Windows `cmd` is the system shell, not the npm launcher.
+    if (process.platform === "win32" && /\.(exe|com)$/i.test(candidate)) {
+      return false;
+    }
+    return fileContains(candidate, [
+      "command-code",
+      "commandcode",
+      "Command Code",
+    ]);
+  }
   if (provider === "fx")
     return fileContains(candidate, [
       "vercel-labs/fx",

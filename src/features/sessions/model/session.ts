@@ -557,7 +557,7 @@ export const HARNESS_LABEL: Record<HarnessId, string> = {
 
 export const HARNESS_TITLE: Record<HarnessId, string> = {
   claude: "Claude Code",
-  cmd: "CommandCode",
+  cmd: "Command Code",
   codex: "Codex",
   cursor: "Cursor",
   grok: "Grok Build",

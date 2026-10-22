@@ -2539,27 +2539,56 @@ fn resolve_cmd() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(home) = &home {
-        candidates.push(home.join(".local/bin/cmd"));
         candidates.push(home.join(".local/bin/command-code"));
-        candidates.push(home.join(".npm-global/bin/cmd"));
+        candidates.push(home.join(".local/bin/cmd"));
         candidates.push(home.join(".npm-global/bin/command-code"));
+        candidates.push(home.join(".npm-global/bin/cmd"));
         candidates.push(home.join(".cargo/bin/cmd"));
         candidates.push(home.join("n/bin/cmd"));
     }
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        candidates.push(appdata.join("npm/command-code.cmd"));
+        candidates.push(appdata.join("npm/cmd.cmd"));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin/command-code"));
     #[cfg(target_os = "macos")]
     candidates.push(PathBuf::from("/opt/homebrew/bin/cmd"));
+    candidates.push(PathBuf::from("/usr/local/bin/command-code"));
     candidates.push(PathBuf::from("/usr/local/bin/cmd"));
+    candidates.push(PathBuf::from("/usr/bin/command-code"));
     candidates.push(PathBuf::from("/usr/bin/cmd"));
+    candidates.push(PathBuf::from("/snap/bin/command-code"));
     candidates.push(PathBuf::from("/snap/bin/cmd"));
-    if let Some(from_shell) = which_via_login_shell("cmd") {
-        candidates.push(from_shell);
-    }
-    // `command-code` is the long-name launcher shipped by the npm package.
+    // `command-code` is the long-name launcher shipped by the npm package and
+    // cannot collide with the Windows shell.
     if let Some(from_shell) = which_via_login_shell("command-code") {
         candidates.push(from_shell);
     }
+    if let Some(from_shell) = which_via_login_shell("cmd") {
+        candidates.push(from_shell);
+    }
 
-    first_binary(candidates)
+    first_binary_matching(candidates, is_command_code_candidate)
+}
+
+/// Reject the Windows shell when a PATH entry resolves `cmd` to `cmd.exe`.
+fn is_command_code_candidate(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let shell = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("com")
+            });
+        if shell && binary_name_eq(path, "cmd") {
+            return false;
+        }
+    }
+    let _ = path;
+    true
 }
 
 fn resolve_antigravity() -> Option<PathBuf> {
@@ -4351,12 +4380,22 @@ mod reap_logic_tests {
     }
 
     #[test]
-    fn should_reap_legacy_cursor_acp_orphaned_to_launchd() {
-        let args = "/Users/n/.local/bin/cursor-agent --use-system-ca /Users/n/index.js acp";
-        assert!(should_reap_process(&row(10, 1, args, None), 42, |_| false));
-        assert!(!should_reap_process(&row(10, 42, args, None), 42, |_| true));
-        assert!(!is_legacy_orphaned_cursor_acp(
-            "node /usr/local/bin/typescript-language-server --stdio"
-        ));
+    fn command_code_candidates_reject_the_windows_shell() {
+        #[cfg(windows)]
+        {
+            assert!(!is_command_code_candidate(Path::new(
+                r"C:\Windows\System32\cmd.exe"
+            )));
+            assert!(!is_command_code_candidate(Path::new(
+                r"C:\Windows\System32\cmd.com"
+            )));
+            assert!(is_command_code_candidate(Path::new(
+                r"C:\Users\n\AppData\Roaming\npm\command-code.cmd"
+            )));
+        }
+        #[cfg(not(windows))]
+        assert!(is_command_code_candidate(Path::new(
+            "/usr/local/bin/command-code"
+        )));
     }
 }

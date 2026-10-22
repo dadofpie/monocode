@@ -174,12 +174,20 @@ export async function cancelCmdTurn(sessionId: string): Promise<void> {
   }
   live.cancelled = true;
   live.muteUpdates = true;
+  clearStallWatchdog(live);
   await killChild(sessionId).catch(() => undefined);
   settleTurn(live);
 }
 
 export async function stopCmdSession(sessionId: string): Promise<void> {
   cancelledThreads.delete(sessionId);
+  const live = liveByThread.get(sessionId);
+  if (live) {
+    live.cancelled = true;
+    live.muteUpdates = true;
+    clearStallWatchdog(live);
+    settleTurn(live);
+  }
   liveByThread.delete(sessionId);
   unwatchChild(sessionId);
   await killChild(sessionId).catch(() => undefined);
@@ -239,6 +247,13 @@ function ensureCmdLive(input: SendTurnInput): Live {
 type PreparedCmdPrompt = { text: string; attachments?: Attachment[] };
 
 /**
+ * Print mode passes the prompt as one argv value. Windows caps the whole
+ * command line at 32k characters, so keep inline attachment content under a
+ * conservative budget and leave the rest as path references.
+ */
+const CMD_INLINE_PROMPT_BUDGET = 24_000;
+
+/**
  * Text attachments (markdown, docs, code) are inlined into the prompt so the
  * `cmd` CLI never forwards them to its backend as file parts (which rejects
  * types like text/markdown). Unreadable files fall back to path references.
@@ -252,12 +267,21 @@ async function prepareCmdPrompt(
   if (inline.length === 0) return { text, attachments };
   const blocks: string[] = [];
   const failed: Attachment[] = [];
+  let used = text.length;
   for (const attachment of inline) {
     try {
       const content = await readHarnessTextFile(attachment.path ?? "");
-      blocks.push(
-        formatCmdInlineAttachment(attachment.name, attachment.mimeType, content),
+      const block = formatCmdInlineAttachment(
+        attachment.name,
+        attachment.mimeType,
+        content,
       );
+      if (used + block.length > CMD_INLINE_PROMPT_BUDGET) {
+        failed.push(attachment);
+        continue;
+      }
+      used += block.length;
+      blocks.push(block);
     } catch {
       // Fall through: the path reference still gives the agent a way
       // to read the file with its own tools.

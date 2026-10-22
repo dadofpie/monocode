@@ -38,7 +38,7 @@ export {
  */
 const CLI: Record<HarnessId, { name: string; install?: string }> = {
   claude: { name: "Claude Code CLI" },
-  cmd: { name: "CommandCode CLI", install: "npm i -g command-code" },
+  cmd: { name: "Command Code CLI", install: "npm i -g command-code" },
   codex: { name: "Codex CLI" },
   cursor: { name: "Cursor CLI" },
   grok: {

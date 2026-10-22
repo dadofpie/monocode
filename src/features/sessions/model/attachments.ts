@@ -266,7 +266,14 @@ export async function attachmentsFromFiles(
   const blobs: File[] = [];
   for (const file of files) {
     const path = nativePath(file);
-    if (path && (!options?.snapshot || !isVolatileSourcePath(path))) {
+    // Snapshot volatile paths only when the file can be read into memory.
+    // A large clipboard file keeps its path instead of being dropped.
+    const snapshot =
+      options?.snapshot &&
+      path != null &&
+      isVolatileSourcePath(path) &&
+      file.size <= MAX_EMBED_BYTES;
+    if (path && !snapshot) {
       pathFiles.push(path);
     } else {
       blobs.push(file);

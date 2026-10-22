@@ -245,6 +245,8 @@ export function UsageChips({
     CmdAccountUsageSnapshot[] | null
   >(null);
   const cmdAccountsUsageAt = useRef(0);
+  const cmdAccountsSeq = useRef(0);
+  const cmdUsageSeq = useRef(0);
   const claudeAccountId =
     session?.harness === "claude" && session.providerAccountId
       ? session.providerAccountId
@@ -308,10 +310,13 @@ export function UsageChips({
 
   const refreshCmdAccounts = useCallback(async () => {
     if (!wantCmd) return;
+    const seq = ++cmdAccountsSeq.current;
     try {
-      setCmdAccounts(await fetchCmdAccounts());
+      const accounts = await fetchCmdAccounts();
+      if (seq !== cmdAccountsSeq.current) return;
+      setCmdAccounts(accounts);
     } catch {
-      setCmdAccounts(null);
+      if (seq === cmdAccountsSeq.current) setCmdAccounts(null);
     }
   }, [wantCmd]);
 
@@ -319,8 +324,11 @@ export function UsageChips({
     if (!wantCmd) return;
     const nowMs = Date.now();
     if (!force && nowMs - cmdAccountsUsageAt.current < 60_000) return;
+    const seq = ++cmdUsageSeq.current;
     try {
-      setCmdAccountsUsage(await fetchCmdAccountsUsage());
+      const usage = await fetchCmdAccountsUsage();
+      if (seq !== cmdUsageSeq.current) return;
+      setCmdAccountsUsage(usage);
       cmdAccountsUsageAt.current = Date.now();
     } catch {
       // Rows fall back to "usage unavailable"; the account list still works.
@@ -378,8 +386,10 @@ export function UsageChips({
       setRefreshing(true);
       let result: CmdAccountSwitch;
       const operation = (async () => {
+        const seq = ++cmdAccountsSeq.current;
         result = await requestCmdAccountSwitch(id);
-        setCmdAccounts(await fetchCmdAccounts());
+        const accounts = await fetchCmdAccounts();
+        if (seq === cmdAccountsSeq.current) setCmdAccounts(accounts);
         // Usage is keyed to the active account file, so re-read it too.
         await loadRateLimits("cmd", "default", true);
         await refreshCmdAccountsUsage(true);

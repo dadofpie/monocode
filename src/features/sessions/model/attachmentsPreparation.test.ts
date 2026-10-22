@@ -42,6 +42,25 @@ describe("file attachment preparation", () => {
     },
   );
 
+  it("keeps a large volatile file as a path when snapshot mode cannot read it", async () => {
+    const file = new File([], "Screenshot.png", { type: "image/png" });
+    Object.defineProperty(file, "path", { value: "/tmp/Screenshot.png" });
+    Object.defineProperty(file, "size", { value: MAX_EMBED_BYTES + 1 });
+    invoke.mockResolvedValue([
+      {
+        path: "/tmp/Screenshot.png",
+        name: "Screenshot.png",
+        size: MAX_EMBED_BYTES + 1,
+        isDir: false,
+      },
+    ]);
+    const files = await attachmentsFromFiles([file], { snapshot: true });
+    expect(files[0]).toMatchObject({ path: "/tmp/Screenshot.png" });
+    expect(invoke).toHaveBeenCalledWith("inspect_paths", {
+      paths: ["/tmp/Screenshot.png"],
+    });
+  });
+
   it("keeps large disk documents as paths without reading them into the prompt", async () => {
     invoke.mockResolvedValue([
       {

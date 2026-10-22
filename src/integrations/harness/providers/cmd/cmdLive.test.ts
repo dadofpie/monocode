@@ -9,11 +9,12 @@ type Watch = {
 const state = vi.hoisted(() => ({
   spawned: [] as string[][],
   watches: [] as Watch[],
+  textContent: "",
 }));
 
 vi.mock("../../core/child", () => ({
   resolveCmdBinary: async () => ({ path: "/fake/cmd" }),
-  readHarnessTextFile: async () => "",
+  readHarnessTextFile: async () => state.textContent,
   spawnChild: async (
     _sessionId: string,
     _path: string,
@@ -35,7 +36,7 @@ vi.mock("../../core/child", () => ({
   },
 }));
 
-const { sendCmdTurn } = await import("./cmd");
+const { sendCmdTurn, stopCmdSession } = await import("./cmd");
 
 function send(sessionId: string, text: string) {
   const events: HarnessEvent[] = [];
@@ -74,6 +75,7 @@ describe("cmd live turn recovery", () => {
   beforeEach(() => {
     state.spawned.length = 0;
     state.watches.length = 0;
+    state.textContent = "";
   });
 
   it(
@@ -231,6 +233,53 @@ describe("cmd live turn recovery", () => {
         detail: "all tests passed",
       }),
     );
+
+    emit({ type: "result", subtype: "success" });
+    await turn;
+  });
+
+  it("settles a pending turn when the session is stopped", async () => {
+    const { turn } = send("cmd-stop", "hi");
+    await waitFor(() => state.spawned.length === 1, "first spawn");
+
+    await stopCmdSession("cmd-stop");
+    await expect(turn).resolves.toBeUndefined();
+  });
+
+  it("keeps inline attachment content under the argv budget", async () => {
+    state.textContent = "x".repeat(20_000);
+    const events: HarnessEvent[] = [];
+    const turn = sendCmdTurn({
+      sessionId: "cmd-inline-budget",
+      cwd: "/repo",
+      text: "summarize",
+      model: "cmd:deepseek/deepseek-v4.1-flash",
+      runtimeMode: "auto",
+      attachments: [
+        {
+          id: "a",
+          name: "a.md",
+          mimeType: "text/markdown",
+          kind: "file",
+          size: 20_000,
+          path: "/repo/a.md",
+        },
+        {
+          id: "b",
+          name: "b.md",
+          mimeType: "text/markdown",
+          kind: "file",
+          size: 20_000,
+          path: "/repo/b.md",
+        },
+      ],
+      onEvent: (event) => events.push(event),
+    });
+    await waitFor(() => state.spawned.length === 1, "first spawn");
+
+    const prompt = state.spawned[0]?.find((arg) => arg.includes("summarize")) ?? "";
+    expect(prompt.length).toBeLessThan(30_000);
+    expect(prompt).toContain("/repo/b.md");
 
     emit({ type: "result", subtype: "success" });
     await turn;

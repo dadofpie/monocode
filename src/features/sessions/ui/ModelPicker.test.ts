@@ -179,7 +179,7 @@ describe("model picker", () => {
       container.querySelector('[role="tab"][aria-label="Antigravity"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[role="tab"][aria-label="CommandCode"]'),
+      container.querySelector('[role="tab"][aria-label="Command Code"]'),
     ).not.toBeNull();
     const grokTab = container.querySelector<HTMLButtonElement>(
       '[role="tab"][aria-label="Grok Build"]',

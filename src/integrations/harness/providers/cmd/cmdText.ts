@@ -7,7 +7,8 @@ import {
 } from "../../core/child";
 import { buildCmdSpawnArgs, parseCmdLine, strField } from "./cmdProtocol";
 
-const TEXT_CHILD_ID = "monocode-cmd-text";
+const TEXT_CHILD_PREFIX = "monocode-cmd-text-";
+let textSeq = 0;
 const REQUEST_TIMEOUT_MS = 90_000;
 
 /**
@@ -22,6 +23,7 @@ export async function runCmdTextPrompt(input: {
   timeoutMs?: number;
 }): Promise<string> {
   const { path } = await resolveCmdBinary();
+  const childId = `${TEXT_CHILD_PREFIX}${++textSeq}`;
   const timeoutMs = input.timeoutMs ?? REQUEST_TIMEOUT_MS;
   let output = "";
   let settled = false;
@@ -31,11 +33,11 @@ export async function runCmdTextPrompt(input: {
       if (settled) return;
       settled = true;
       reject(new Error("CommandCode text generation timed out"));
-      void killChild(TEXT_CHILD_ID).catch(() => undefined);
+      void killChild(childId).catch(() => undefined);
     }, timeoutMs);
 
     watchChild(
-      TEXT_CHILD_ID,
+      childId,
       (line) => {
         if (settled) return;
         const rec = parseCmdLine(line);
@@ -61,7 +63,7 @@ export async function runCmdTextPrompt(input: {
 
   try {
     await spawnChild(
-      TEXT_CHILD_ID,
+      childId,
       path,
       buildCmdSpawnArgs({
         text: input.prompt,
@@ -75,8 +77,8 @@ export async function runCmdTextPrompt(input: {
     );
     await done;
   } finally {
-    unwatchChild(TEXT_CHILD_ID);
-    await killChild(TEXT_CHILD_ID).catch(() => undefined);
+    unwatchChild(childId);
+    await killChild(childId).catch(() => undefined);
   }
 
   const trimmed = output.trim();

@@ -601,7 +601,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("5-hour limit");
     expect(dialog?.textContent).toContain("Weekly limit");
@@ -642,7 +642,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("5h 0% · wk 40%");
     expect(dialog?.textContent).toContain("Command Code sign-in expired");
@@ -659,7 +659,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     expect(document.body.textContent).toContain("checking usage…");
   });
 
@@ -676,7 +676,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     expect(onRefreshCmdAccountsUsage).toHaveBeenCalledOnce();
   });
 
@@ -696,7 +696,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     const switchButton = [
       ...document.querySelectorAll<HTMLButtonElement>("button"),
     ].find((item) => item.textContent === "Switch");
@@ -721,7 +721,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     const switchButton = [
       ...document.querySelectorAll<HTMLButtonElement>("button"),
     ].find((item) => item.textContent === "Switch");
@@ -748,7 +748,7 @@ describe("UsageProviderChip for Command Code", () => {
       ),
     );
 
-    await act(async () => button("CommandCode usage details").click());
+    await act(async () => button("Command Code usage details").click());
     expect(document.body.textContent).toContain("cc-switch was not found.");
     expect(document.body.textContent).not.toContain("Switch");
   });
