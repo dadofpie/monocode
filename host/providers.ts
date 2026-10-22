@@ -25,6 +25,8 @@ import { generateClaudeBranchName } from "../src/integrations/harness/providers/
 import { generateCursorSessionTitle } from "../src/integrations/harness/providers/cursor/cursorTitle";
 import { generateGrokSessionTitle } from "../src/integrations/harness/providers/grok/grokTitle";
 import { generateOpenCodeSessionTitle } from "../src/integrations/harness/providers/opencode/opencodeTitle";
+import { generateCmdSessionTitle } from "../src/integrations/harness/providers/cmd/cmdTitle";
+import { generateCmdBranchName } from "../src/integrations/harness/providers/cmd/cmdGit";
 import {
   generatePiSessionTitle,
   generateOmpSessionTitle,
@@ -169,6 +171,8 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
     bind: cmd.bindCmdSession,
     approve: cmd.respondCmdApproval,
     answer: unsupportedQuestion,
+    generateTitle: generateCmdSessionTitle,
+    generateBranchName: generateCmdBranchName,
   },
 };
 
