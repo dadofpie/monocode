@@ -3,16 +3,22 @@ import { attachmentPathText } from "../../../../features/sessions/model/attachme
 import type { Attachment } from "../../../../features/sessions/model/session";
 import {
   buildCmdSpawnArgs,
+  cmdContentText,
   cmdEventType,
+  cmdExitCodeOf,
   cmdExitError,
   cmdFrameType,
   cmdModeArgs,
   cmdPromptWithAttachments,
+  cmdRetryDelayMs,
+  cmdStatusFromEvent,
   cmdToolTitle,
+  CMD_MAX_TURN_ATTEMPTS,
   defaultModelFromCmdListOutput,
   formatCmdErrorMessage,
   formatCmdInlineAttachment,
   isCmdInlineTextAttachment,
+  isCmdTransientNetworkError,
   MAX_CMD_INLINE_CHARS,
   modelsFromCmdListOutput,
   parseCmdLine,
@@ -21,6 +27,7 @@ import {
   splitCmdAttachments,
   toolKindFromCmdName,
   toolRefFromCmdEvent,
+  truncateCmdDetail,
 } from "./cmdProtocol";
 
 const TOOL_QUEUED =
@@ -32,9 +39,12 @@ const RESULT_SUCCESS =
 
 describe("cmd protocol", () => {
   it("maps runtime modes to permission flags", () => {
-    expect(cmdModeArgs("supervised")).toEqual([]);
-    expect(cmdModeArgs("auto-accept-edits")).toEqual(["--auto-accept"]);
-    expect(cmdModeArgs("auto")).toEqual(["--auto-accept"]);
+    expect(cmdModeArgs("supervised")).toEqual([
+      "--permission-mode",
+      "default",
+    ]);
+    expect(cmdModeArgs("auto-accept-edits")).toEqual(["--yolo"]);
+    expect(cmdModeArgs("auto")).toEqual(["--yolo"]);
     expect(cmdModeArgs("full-access")).toEqual(["--yolo"]);
   });
 
@@ -122,6 +132,70 @@ describe("cmd protocol", () => {
     expect(cmdExitError(1, "  some failure  ").message).toMatch(/some failure/);
   });
 
+  it("keeps the CLI exit code on errors for retry decisions", () => {
+    expect(cmdExitCodeOf(cmdExitError(6, ""))).toBe(6);
+    expect(cmdExitCodeOf(cmdExitError(7, ""))).toBe(7);
+    expect(cmdExitCodeOf(cmdExitError(3, ""))).toBe(3);
+    expect(cmdExitCodeOf(new Error("CommandCode network failure."))).toBeNull();
+    expect(cmdExitCodeOf("network failure")).toBeNull();
+  });
+
+  it("classifies the CLI's connection failures as transient", () => {
+    // The exact print-mode result error behind the interrupted turns.
+    expect(
+      isCmdTransientNetworkError(
+        "Error: Unable to connect to the API. Please check your network connection.",
+      ),
+    ).toBe(true);
+    expect(isCmdTransientNetworkError("CommandCode network failure.")).toBe(true);
+    expect(isCmdTransientNetworkError("CommandCode API server error.")).toBe(true);
+    expect(isCmdTransientNetworkError("", 6)).toBe(true);
+    expect(isCmdTransientNetworkError("", 7)).toBe(true);
+    expect(isCmdTransientNetworkError("socket hang up")).toBe(true);
+    expect(isCmdTransientNetworkError("other side closed")).toBe(true);
+    expect(isCmdTransientNetworkError(cmdExitError(3, "").message)).toBe(false);
+    expect(isCmdTransientNetworkError(cmdExitError(5, "").message)).toBe(false);
+    expect(isCmdTransientNetworkError("", 3)).toBe(false);
+  });
+
+  it("mirrors the CLI's retry backoff envelope", () => {
+    expect(CMD_MAX_TURN_ATTEMPTS).toBe(10);
+    expect([0, 1, 2, 3].map(cmdRetryDelayMs)).toEqual([
+      1_000, 1_000, 1_000, 1_000,
+    ]);
+    expect([4, 5, 6, 7, 9].map(cmdRetryDelayMs)).toEqual([
+      1_600, 3_200, 6_400, 10_000, 10_000,
+    ]);
+  });
+
+  it("surfaces the CLI's own recovery events as keyed statuses", () => {
+    expect(cmdStatusFromEvent({ type: "api_retry", attempt: 3 })).toEqual({
+      key: "cmd-connection",
+      text: "Connection issue. Retrying… (attempt 3)",
+    });
+    expect(cmdStatusFromEvent({ type: "api_retry" })).toEqual({
+      key: "cmd-connection",
+      text: "Connection issue. Retrying…",
+    });
+    expect(
+      cmdStatusFromEvent({ type: "stream_restart", attempt: 1, maxAttempts: 3 }),
+    ).toEqual({
+      key: "cmd-connection",
+      text: "Connection dropped mid-response. Retrying… (1/3)",
+    });
+    expect(
+      cmdStatusFromEvent({
+        type: "continuation_recovery",
+        attempt: 2,
+        maxAttempts: 2,
+      }),
+    ).toEqual({
+      key: "cmd-connection",
+      text: "Recovering an interrupted response (2/2).",
+    });
+    expect(cmdStatusFromEvent({ type: "text_delta", delta: "x" })).toBeNull();
+  });
+
   it("classifies cmd tool names", () => {
     expect(toolKindFromCmdName("read_file")).toBe("read");
     expect(toolKindFromCmdName("write_file")).toBe("edit");
@@ -167,6 +241,8 @@ describe("cmd protocol", () => {
       "meta/muse-spark-1.3-contributor        Muse Spark 1.3 at up to 95% off",
       "deepseek/deepseek-v4-flash             fast hybrid-attention reasoning",
       "minimaxai/minimax-m3                   frontier coding",
+      "z-ai/glm-5.3-flash                     fast, affordable GLM coding",
+      "zai-org/glm-5.2-fast                   high-throughput GLM-5.2",
       "some-org/unknown-model                 something new",
     ].join("\n");
     const models = modelsFromCmdListOutput(output);
@@ -185,13 +261,64 @@ describe("cmd protocol", () => {
     });
     expect(
       effort("deepseek/deepseek-v4-flash")?.options.map((option) => option.value),
-    ).toEqual(["high", "max"]);
+    ).toEqual(["off", "high", "max"]);
     expect(
       effort("minimaxai/minimax-m3")?.options.map((option) => option.value),
     ).toEqual(["low", "medium", "high"]);
     expect(
-      effort("some-org/unknown-model")?.options.map((option) => option.value),
-    ).toEqual(["low", "medium", "high", "xhigh"]);
+      effort("z-ai/glm-5.3-flash")?.options.map((option) => option.value),
+    ).toEqual(["low", "high", "max"]);
+    expect(effort("z-ai/glm-5.3-flash")).toMatchObject({
+      value: "high",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "high", label: "High" },
+        { value: "max", label: "Max" },
+      ],
+    });
+    // GLM-5.2 Fast has no adjustable reasoning effort: no effort setting.
+    expect(effort("zai-org/glm-5.2-fast")).toBeUndefined();
+    // Unknown ids get no Reasoning control rather than an unsupported level.
+    expect(effort("some-org/unknown-model")).toBeUndefined();
+  });
+
+  it("parses bare provider model ids and stops before decision models", () => {
+    const output = [
+      "Available models  ·  4 models",
+      "",
+      "Anthropic",
+      "",
+      "claude-sonnet-5-5            best combo of speed & intelligence (recommended)",
+      "claude-haiku-4-5             fastest & most compact",
+      "",
+      "OpenAI",
+      "",
+      "gpt-6-astra                  most capable OpenAI model",
+      "",
+      "Decision models (headless only)",
+      "typesafe/jev  typed questions in, probabilities out",
+    ].join("\n");
+    const models = modelsFromCmdListOutput(output);
+    expect(models.map((model) => model.nativeId)).toEqual([
+      "claude-sonnet-5-5",
+      "claude-haiku-4-5",
+      "gpt-6-astra",
+    ]);
+    expect(models[0]?.settings).toBeDefined();
+    expect(models[1]?.settings).toBeUndefined();
+    expect(defaultModelFromCmdListOutput(output)).toBeNull();
+  });
+
+  it("keeps tool output text readable in transcript rows", () => {
+    expect(
+      cmdContentText([
+        { type: "text", text: "line one\n" },
+        { type: "tool_use", id: "x" },
+        { type: "text", text: "line two" },
+      ]),
+    ).toBe("line one\nline two");
+    expect(truncateCmdDetail("  short  ")).toBe("short");
+    expect(truncateCmdDetail("abcdef", 3)).toContain("truncated 3 chars");
   });
 
   it("appends attachments as path lines in the print-mode prompt", () => {
@@ -313,5 +440,12 @@ describe("cmd protocol", () => {
         "Failed to read OpenCode response: response too big for into-string",
       ),
     ).toContain("too large");
+    expect(
+      formatCmdErrorMessage(
+        "Error: Unable to connect to the API. Please check your network connection.",
+      ),
+    ).toBe(
+      "CommandCode network error: Unable to connect to the API. Please check your network connection.",
+    );
   });
 });

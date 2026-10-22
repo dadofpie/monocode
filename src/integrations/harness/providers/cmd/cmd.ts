@@ -13,12 +13,17 @@ import {
 } from "../../core/child";
 import {
   buildCmdSpawnArgs,
+  cmdContentText,
   cmdEvent,
   cmdEventType,
+  cmdExitCodeOf,
   cmdExitError,
   cmdFrameType,
   cmdPreviewFromTool,
+  cmdRetryDelayMs,
+  cmdStatusFromEvent,
   cmdToolTitle,
+  CMD_MAX_TURN_ATTEMPTS,
   formatCmdErrorMessage,
   formatCmdInlineAttachment,
   isCmdTransientNetworkError,
@@ -30,6 +35,7 @@ import {
   summarizeCmdTool,
   toolKindFromCmdName,
   toolRefFromCmdEvent,
+  truncateCmdDetail,
   type CmdToolRef,
 } from "./cmdProtocol";
 import type {
@@ -58,7 +64,9 @@ type Live = {
   stderrTail: string[];
   turns: Promise<void>;
   started: boolean;
-  toolsCompleted: number;
+  stallNotified: boolean;
+  stallNotifyTimer?: ReturnType<typeof setTimeout>;
+  stallKillTimer?: ReturnType<typeof setTimeout>;
 };
 
 type Resume = {
@@ -66,9 +74,61 @@ type Resume = {
   cwd: string;
 };
 
-/** Watchdog: a wedged `cmd -p` child must not park a turn forever. */
-const TURN_TIMEOUT_MS = 30 * 60_000;
+/**
+ * Watchdog: a wedged `cmd -p` child must not park a turn forever, but silence
+ * is ambiguous — a long quiet tool call is legitimate — so the first
+ * threshold only surfaces a status. Only silence past the kill threshold is
+ * treated as a dead transport: the turn is failed as transient and the retry
+ * loop resumes from the provider session's committed transcript.
+ */
+const STALL_NOTIFY_MS = 10 * 60_000;
+const STALL_KILL_MS = 30 * 60_000;
 const MAX_TURNS_PER_RUN = 100;
+
+/** Raised when the child went silent past STALL_KILL_MS; the retry loop
+ *  treats it like a dropped connection. */
+class CmdStallError extends Error {
+  constructor() {
+    super("CommandCode stopped responding (no output for 30 minutes).");
+  }
+}
+
+function clearStallWatchdog(live: Live): void {
+  clearTimeout(live.stallNotifyTimer);
+  clearTimeout(live.stallKillTimer);
+  live.stallNotifyTimer = undefined;
+  live.stallKillTimer = undefined;
+}
+
+function armStallWatchdog(sessionId: string, live: Live): void {
+  clearStallWatchdog(live);
+  live.stallNotified = false;
+  live.stallNotifyTimer = setTimeout(() => {
+    live.stallNotifyTimer = undefined;
+    if (liveByThread.get(sessionId) !== live || live.turnSettled) return;
+    if (live.stallNotified) return;
+    live.stallNotified = true;
+    live.onEvent({
+      type: "status",
+      key: "cmd-connection",
+      text: "CommandCode has been quiet for 10 minutes — still waiting for output.",
+    });
+  }, STALL_NOTIFY_MS);
+  live.stallKillTimer = setTimeout(() => {
+    if (liveByThread.get(sessionId) !== live || live.turnSettled) return;
+    clearStallWatchdog(live);
+    live.turnFailed?.(new CmdStallError());
+    live.turnDone = null;
+    live.turnFailed = null;
+    void killChild(sessionId).catch(() => undefined);
+  }, STALL_KILL_MS);
+}
+
+/** Re-armed on every stdout/stderr line: only true silence trips the watchdog. */
+function noteStallActivity(sessionId: string, live: Live): void {
+  if (live.turnSettled || !live.stallKillTimer) return;
+  armStallWatchdog(sessionId, live);
+}
 
 const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
@@ -99,7 +159,7 @@ export async function steerCmdTurn(_input: SteerTurnInput): Promise<void> {
   throw new Error("CommandCode does not support steering an in-flight turn");
 }
 
-/** `--yolo`/`--auto-accept` pre-authorize, so approvals never park a turn. */
+/** `--yolo` pre-authorizes; headless `cmd` cannot answer approvals. */
 export function respondCmdApproval(
   _sessionId: string,
   _requestId: number,
@@ -170,13 +230,13 @@ function ensureCmdLive(input: SendTurnInput): Live {
     stderrTail: [],
     turns: Promise.resolve(),
     started: false,
-    toolsCompleted: 0,
+    stallNotified: false,
   };
   liveByThread.set(input.sessionId, live);
   return live;
 }
 
-const MAX_NETWORK_RETRIES = 2;
+type PreparedCmdPrompt = { text: string; attachments?: Attachment[] };
 
 /**
  * Text attachments (markdown, docs, code) are inlined into the prompt so the
@@ -186,7 +246,7 @@ const MAX_NETWORK_RETRIES = 2;
 async function prepareCmdPrompt(
   text: string,
   attachments?: Attachment[],
-): Promise<{ text: string; attachments?: Attachment[] }> {
+): Promise<PreparedCmdPrompt> {
   if (!attachments || attachments.length === 0) return { text, attachments };
   const { inline, referenced } = splitCmdAttachments(attachments);
   if (inline.length === 0) return { text, attachments };
@@ -211,27 +271,44 @@ async function prepareCmdPrompt(
   };
 }
 
+/**
+ * The CLI commits the user message to its session before the first model
+ * call, so after a connection failure the transcript already holds the
+ * request (and any completed tool results). Respawning with the original
+ * prompt would duplicate it; a continuation nudge into the resumed session is
+ * the equivalent of the CLI's own in-process stream restart.
+ */
+const CMD_RETRY_CONTINUATION_PROMPT =
+  "Your previous response was interrupted by a connection problem. " +
+  "Continue exactly where you left off: do not repeat completed work, " +
+  "re-run tools whose results you already have, or restate output that was already produced.";
+
 async function runCmdTurn(live: Live, input: SendTurnInput): Promise<void> {
+  const prepared = await prepareCmdPrompt(input.text, input.attachments);
   let attempt = 0;
   while (true) {
     attempt++;
     try {
-      await runCmdTurnOnce(live, input);
+      await runCmdTurnOnce(live, input, prepared, attempt > 1);
       return;
     } catch (error) {
       if (live.cancelled) return;
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const isTransient = isCmdTransientNetworkError(rawMessage);
-      const canRetry =
-        isTransient && live.toolsCompleted === 0 && attempt <= MAX_NETWORK_RETRIES;
+      const isTransient =
+        error instanceof CmdStallError ||
+        isCmdTransientNetworkError(rawMessage, cmdExitCodeOf(error));
+      const canRetry = isTransient && attempt < CMD_MAX_TURN_ATTEMPTS;
 
       if (canRetry) {
-        const delayMs = attempt * 1500;
+        const delayMs = cmdRetryDelayMs(attempt - 1);
         live.onEvent({
           type: "status",
-          text: `CommandCode connection dropped; retrying in ${Math.round(delayMs / 1000)}s…`,
+          key: "cmd-connection",
+          text:
+            `Connection issue. Restarting the turn in ${Math.round(delayMs / 1000)}s ` +
+            `(attempt ${attempt + 1} of ${CMD_MAX_TURN_ATTEMPTS})…`,
         });
-        await new Promise((r) => setTimeout(r, delayMs));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
         if (live.cancelled) return;
         continue;
       }
@@ -243,27 +320,32 @@ async function runCmdTurn(live: Live, input: SendTurnInput): Promise<void> {
   }
 }
 
-async function runCmdTurnOnce(live: Live, input: SendTurnInput): Promise<void> {
+async function runCmdTurnOnce(
+  live: Live,
+  input: SendTurnInput,
+  prepared: PreparedCmdPrompt,
+  isRetry: boolean,
+): Promise<void> {
   const { path } = await resolveCmdBinaryImpl();
   live.cancelled = false;
   live.muteUpdates = false;
   live.turnSettled = false;
   live.openTools.clear();
   live.stderrTail = [];
-  live.toolsCompleted = 0;
 
   if (!live.started) {
     live.started = true;
     live.onEvent({ type: "session.started" });
   }
 
-  const prompt = await prepareCmdPrompt(input.text, input.attachments);
+  const resumeId = live.cmdSessionId;
+  const continuation = isRetry && Boolean(resumeId);
   const args = buildCmdSpawnArgs({
-    text: prompt.text,
-    attachments: prompt.attachments,
+    text: continuation ? CMD_RETRY_CONTINUATION_PROMPT : prepared.text,
+    attachments: continuation ? undefined : prepared.attachments,
     model: nativeModelId(input.model),
     effort: input.modelSettings?.effort,
-    resume: live.cmdSessionId,
+    resume: resumeId,
     maxTurns: MAX_TURNS_PER_RUN,
     runtimeMode: input.runtimeMode,
   });
@@ -273,17 +355,12 @@ async function runCmdTurnOnce(live: Live, input: SendTurnInput): Promise<void> {
     live.turnFailed = reject;
   });
 
-  const watchdog = setTimeout(() => {
-    if (live.turnSettled) return;
-    live.turnFailed?.(new Error("CommandCode turn timed out."));
-    live.turnDone = null;
-    live.turnFailed = null;
-    void killChild(input.sessionId).catch(() => undefined);
-  }, TURN_TIMEOUT_MS);
-
   watchChild(
     input.sessionId,
-    (line) => handleLine(input.sessionId, live, line),
+    (line) => {
+      noteStallActivity(input.sessionId, live);
+      handleLine(input.sessionId, live, line);
+    },
     (code) => {
       // Clean exit after the result line is the normal one-shot ending.
       if (live.turnSettled || liveByThread.get(input.sessionId) !== live) return;
@@ -297,10 +374,12 @@ async function runCmdTurnOnce(live: Live, input: SendTurnInput): Promise<void> {
       live.turnFailed = null;
     },
     (line) => {
+      noteStallActivity(input.sessionId, live);
       live.stderrTail.push(line);
       if (live.stderrTail.length > 10) live.stderrTail.shift();
     },
   );
+  armStallWatchdog(input.sessionId, live);
 
   try {
     // The provider tag is required: the backend only spawns resolved
@@ -311,7 +390,7 @@ async function runCmdTurnOnce(live: Live, input: SendTurnInput): Promise<void> {
     if (live.cancelled) return;
     throw error;
   } finally {
-    clearTimeout(watchdog);
+    clearStallWatchdog(live);
     live.turnDone = null;
     live.turnFailed = null;
     unwatchChild(input.sessionId);
@@ -332,6 +411,12 @@ function handleLine(sessionId: string, live: Live, line: string): void {
   const event = cmdEvent(rec);
   if (!event) return;
   bindProviderSession(sessionId, live, rec);
+
+  const recovery = cmdStatusFromEvent(event);
+  if (recovery) {
+    live.onEvent({ type: "status", key: recovery.key, text: recovery.text });
+    return;
+  }
 
   switch (cmdEventType(rec)) {
     case "text_delta": {
@@ -368,10 +453,28 @@ function handleLine(sessionId: string, live: Live, line: string): void {
       });
       return;
     }
+    case "tool_update": {
+      const ref = toolRefFromCmdEvent(event);
+      if (!ref) return;
+      const open = live.openTools.get(ref.callId);
+      const detail = truncateCmdDetail(cmdContentText(event.partial));
+      if (!detail) return;
+      live.onEvent({
+        type: "tool.updated",
+        callId: ref.callId,
+        title: open?.title ?? cmdToolTitle(ref.name, ref.input),
+        kind: toolKindFromCmdName(ref.name),
+        status: "in_progress",
+        detail,
+        preview: cmdPreviewFromTool(ref.name, ref.input),
+      });
+      return;
+    }
     case "tool_completed": {
       const ref = toolRefFromCmdEvent(event);
       if (!ref) return;
-      finishOpenTool(live, ref, "completed");
+      const result = truncateCmdDetail(cmdContentText(event.result));
+      finishOpenTool(live, ref, "completed", result || undefined);
       return;
     }
     case "tool_hook_blocked": {
@@ -394,7 +497,6 @@ function finishOpenTool(
   status: string,
   detail?: string,
 ): void {
-  live.toolsCompleted++;
   const open = live.openTools.get(ref.callId);
   live.openTools.delete(ref.callId);
   live.onEvent({

@@ -40,6 +40,34 @@ export function strField(rec: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+export function numField(
+  rec: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = rec[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Join the text parts of a content array (`content`, `partial`, `result`). */
+export function cmdContentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  let out = "";
+  for (const part of value) {
+    const rec = asRecord(part);
+    if (!rec || strField(rec, "type") !== "text") continue;
+    out += strField(rec, "text");
+  }
+  return out;
+}
+
+/** Tool output can be a whole file; keep the transcript row scannable. */
+export function truncateCmdDetail(text: string, limit = 4_000): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+  return `${trimmed.slice(0, limit)}\n…[truncated ${trimmed.length - limit} chars]`;
+}
+
 /** Parse one stdout line; null when it is not a JSON object (progress text). */
 export function parseCmdLine(line: string): Record<string, unknown> | null {
   const trimmed = line.trim();
@@ -67,21 +95,63 @@ export function cmdEventType(rec: Record<string, unknown>): string {
   return event ? strField(event, "type") : "";
 }
 
+export type CmdEventStatus = { key: string; text: string };
+
+function attemptSuffix(attempt: number | null, max: number | null): string {
+  if (attempt == null) return "";
+  if (max == null) return ` (attempt ${attempt})`;
+  return ` (${attempt}/${max})`;
+}
+
+/**
+ * The CLI's own recovery notices: it retries model calls in-process and
+ * restarts interrupted streams before ever failing a run. Surface them as
+ * status rows (keyed, so each notice replaces the previous one) rather than
+ * swallowing them as unknown events.
+ */
+export function cmdStatusFromEvent(
+  event: Record<string, unknown>,
+): CmdEventStatus | null {
+  const attempt = numField(event, "attempt");
+  const max = numField(event, "maxAttempts");
+  switch (strField(event, "type")) {
+    case "api_retry": {
+      const counter = attempt == null ? "" : ` (attempt ${attempt})`;
+      return {
+        key: "cmd-connection",
+        text: `Connection issue. Retrying…${counter}`,
+      };
+    }
+    case "stream_restart":
+      return {
+        key: "cmd-connection",
+        text: `Connection dropped mid-response. Retrying…${attemptSuffix(attempt, max)}`,
+      };
+    case "continuation_recovery":
+      return {
+        key: "cmd-connection",
+        text: `Recovering an interrupted response${attemptSuffix(attempt, max)}.`,
+      };
+    default:
+      return null;
+  }
+}
+
 /**
  * Permission flags per runtime mode. Headless `cmd` has no UI to answer
- * prompts, so anything but supervised must pre-authorize writes/shell:
- * auto modes accept prompts, full-access bypasses them entirely.
+ * prompts, so `--yolo` is the only flag that enables file writes and shell
+ * commands in print mode. Supervised stays read-only; the auto and
+ * full-access modes all map to `--yolo` because the CLI cannot ask mid-turn.
  */
 export function cmdModeArgs(runtimeMode: RuntimeMode): string[] {
   switch (runtimeMode) {
     case "auto-accept-edits":
     case "auto":
-      return ["--auto-accept"];
     case "full-access":
       return ["--yolo"];
     case "supervised":
     default:
-      return [];
+      return ["--permission-mode", "default"];
   }
 }
 
@@ -325,12 +395,27 @@ export function resultStatusFromCmd(rec: Record<string, unknown>): CmdResultStat
   return { status: "failed", error };
 }
 
+/** The CLI's exit codes are its own classification; keep them on the error so
+ *  retry decisions never depend on message string matching. */
+const cmdExitCodes = new WeakMap<Error, number>();
+
+export function cmdExitCodeOf(error: unknown): number | null {
+  if (!(error instanceof Error)) return null;
+  return cmdExitCodes.get(error) ?? null;
+}
+
 /**
  * Non-zero exits when no result line arrived. Codes from `cmd --help` /
  * headless docs: 3 auth, 4 permission, 5 rate limit, 6 network, 7 server,
  * 8 max turns, 10 credits, 130 interrupted.
  */
 export function cmdExitError(code: number | null, stderrTail: string): Error {
+  const error = cmdExitMessage(code, stderrTail);
+  if (typeof code === "number") cmdExitCodes.set(error, code);
+  return error;
+}
+
+function cmdExitMessage(code: number | null, stderrTail: string): Error {
   const tail = stderrTail.trim().split(/\r?\n/).slice(-3).join(" ").trim();
   const hint = tail ? ` ${tail.slice(0, 240)}` : "";
   switch (code) {
@@ -359,14 +444,25 @@ export function cmdExitError(code: number | null, stderrTail: string): Error {
   }
 }
 
+/**
+ * Connection-level failures worth respawning for. Covers the CLI's own exit
+ * codes (6 connection, 7 API server) and the raw messages it surfaces in
+ * result lines — notably `Error: Unable to connect to the API. Please check
+ * your network connection.` and the undici/transport wording behind mid-stream
+ * drops.
+ */
 export function isCmdTransientNetworkError(
   errorMessage: string,
   code?: number | null,
 ): boolean {
-  if (code === 6) return true;
+  if (code === 6 || code === 7) return true;
   const msg = errorMessage.toLowerCase();
   return (
+    msg.includes("unable to connect to the api") ||
+    msg.includes("check your network connection") ||
     msg.includes("network failure") ||
+    msg.includes("api server error") ||
+    msg.includes("network error") ||
     msg.includes("can't assign requested address") ||
     msg.includes("cant assign requested address") ||
     msg.includes("eaddrnotavail") ||
@@ -380,18 +476,47 @@ export function isCmdTransientNetworkError(
     msg.includes("ehostunreach") ||
     msg.includes("connection refused") ||
     msg.includes("econnrefused") ||
+    msg.includes("socket hang up") ||
+    msg.includes("socket disconnected") ||
+    msg.includes("other side closed") ||
+    msg.includes("econnaborted") ||
+    msg.includes("etimedout") ||
     msg.includes("tls handshake timeout") ||
     msg.includes("i/o timeout") ||
     msg.includes("client.timeout exceeded") ||
     msg.includes("context deadline exceeded") ||
-    msg.includes("unexpected eof")
+    msg.includes("fetch failed") ||
+    msg.includes("unexpected eof") ||
+    msg.includes("unexpected end of stream") ||
+    msg.includes("stream ended")
+  );
+}
+
+/**
+ * Process-level retry envelope, mirroring the CLI's own `callModelWithRetry`
+ * (10 attempts, backoff clamped to 1–10 s). Each attempt here is a full
+ * `cmd -p` respawn because an in-process retry cannot survive a dead
+ * transport.
+ */
+export const CMD_MAX_TURN_ATTEMPTS = 10;
+const CMD_RETRY_BASE_MS = 100;
+const CMD_RETRY_MIN_MS = 1_000;
+const CMD_RETRY_MAX_MS = 10_000;
+
+/** CLI backoff: min(10 s, max(1 s, 100 ms · 2^attempt)), attempt 0-based. */
+export function cmdRetryDelayMs(attempt: number): number {
+  const step = Math.min(Math.max(Math.floor(attempt), 0), 20);
+  return Math.min(
+    CMD_RETRY_MAX_MS,
+    Math.max(CMD_RETRY_MIN_MS, CMD_RETRY_BASE_MS * 2 ** step),
   );
 }
 
 export function formatCmdErrorMessage(rawError: string): string {
   const trimmed = rawError.trim();
   if (isCmdTransientNetworkError(trimmed)) {
-    return `CommandCode network error: ${trimmed}`;
+    const detail = trimmed.replace(/^error:\s*/i, "");
+    return `CommandCode network error: ${detail}`;
   }
   const lower = trimmed.toLowerCase();
   if (lower.includes("response too big for into-string")) {
@@ -412,25 +537,60 @@ export function formatCmdErrorMessage(rawError: string): string {
   return trimmed;
 }
 
+const CMD_NAME_WORDS: Record<string, string> = {
+  ai: "AI",
+  glm: "GLM",
+  gpt: "GPT",
+  hy: "HY",
+  m: "M",
+  v: "V",
+};
+
+const CMD_NAME_BRANDS: Record<string, string> = {
+  deepseek: "DeepSeek",
+  minimax: "MiniMax",
+  minimaxai: "MiniMax",
+  moonshotai: "Moonshot",
+  qwen: "Qwen",
+};
+
 function prettyCmdModelName(nativeId: string): string {
   const base = nativeId.split("/").pop() ?? nativeId;
-  return base
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map((part) =>
-      part.toLowerCase() === "muse" ? "Muse" : part.charAt(0).toUpperCase() + part.slice(1),
-    )
-    .join(" ");
+  const rawParts = base.split(/[-_]/).filter(Boolean);
+  const parts: string[] = [];
+  for (let index = 0; index < rawParts.length; index += 1) {
+    const part = rawParts[index] ?? "";
+    // "claude-sonnet-5-5" reads as 5.5, not "5 5".
+    if (
+      parts.length > 0 &&
+      /^\d+$/.test(part) &&
+      /^\d+$/.test(parts[parts.length - 1] ?? "")
+    ) {
+      parts[parts.length - 1] = `${parts[parts.length - 1]}.${part}`;
+      continue;
+    }
+    const lower = part.toLowerCase();
+    parts.push(
+      CMD_NAME_BRANDS[lower] ??
+        CMD_NAME_WORDS[lower] ??
+        part.charAt(0).toUpperCase() + part.slice(1),
+    );
+  }
+  return parts.join(" ");
 }
 
 /**
  * Reasoning-effort levels the `cmd` CLI accepts per model, probed with
  * `cmd -p --effort bogus-…` (`Unknown effort … Supported: …`). Effort is a
  * per-model setting because levels differ: Muse 1.3 contributor tops out at
- * xhigh, DeepSeek flash/pro only take high/max, MiniMax M3 has no xhigh at
- * all. Unknown ids fall back to the full range minus max.
+ * xhigh, DeepSeek flash/pro take off/high/max, GLM 5.3 Flash takes
+ * low/high/max (no medium/xhigh), MiniMax M3 has no xhigh at all, and
+ * several models (GLM 5/5.1/5.2-fast, Kimi K2.5+, MiMo, Qwen 3.7, …) have no
+ * adjustable effort. An empty list means no effort setting. Unknown ids fall
+ * back to the full range minus max.
  */
 const CMD_EFFORT_LABELS: Record<string, string> = {
+  off: "Off",
   low: "Low",
   medium: "Medium",
   high: "High",
@@ -438,29 +598,123 @@ const CMD_EFFORT_LABELS: Record<string, string> = {
   max: "Max",
 };
 
+/**
+ * Reasoning-effort levels the `cmd` CLI accepts per model, probed against
+ * CommandCode v1.87.1 with `cmd -p --effort bogus` (`Unknown effort …
+ * Supported: …`). Levels differ per model and many have none, so an empty
+ * list means the picker must not offer a Reasoning control. Unknown ids
+ * also fall back to no setting rather than sending an unsupported level.
+ */
 export const CMD_EFFORT_OPTIONS: Record<string, string[]> = {
-  "deepseek/deepseek-v4-flash": ["high", "max"],
-  "deepseek/deepseek-v4-pro": ["high", "max"],
-  "minimaxai/minimax-m3": ["low", "medium", "high"],
-  "moonshotai/kimi-k3": ["low", "high", "max"],
+  "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
+  "claude-haiku-4-5": [],
+  "claude-haiku-5-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-sonnet-4-6": ["low", "medium", "high", "xhigh", "max"],
+  "claude-sonnet-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-sonnet-5-5": ["low", "medium", "high", "xhigh", "max"],
+  "deepseek/deepseek-v4-flash": ["off", "high", "max"],
+  "deepseek/deepseek-v4-flash-fast": ["low", "high", "max"],
+  "deepseek/deepseek-v4-flash-vision-exp": ["off", "high", "max"],
+  "deepseek/deepseek-v4-pro": ["off", "high", "max"],
+  "deepseek/deepseek-v4.1-flash": ["off", "low", "high", "max"],
+  "deepseek/deepseek-v4.1-flash-fast": ["off", "low", "high", "max"],
+  "google/gemini-3.1-flash-lite": ["low", "medium", "high"],
+  "google/gemini-3.5-flash": ["low", "medium", "high"],
+  "google/gemini-3.5-flash-lite": ["low", "medium", "high"],
+  "google/gemini-3.6-flash": ["low", "medium", "high"],
+  "google/gemini-3.7-flash": ["low", "medium", "high"],
+  "google/gemini-3.8-flash": ["low", "medium", "high"],
+  "google/gemini-4-argon": ["low", "medium", "high"],
+  "gpt-5.3-codex": ["low", "medium", "high", "xhigh"],
+  "gpt-5.4": ["low", "medium", "high", "xhigh"],
+  "gpt-5.4-mini": ["low", "medium", "high"],
+  "gpt-5.5": ["low", "medium", "high", "xhigh"],
+  "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-6-sol": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max"],
+  "inclusionai/ling-3.1-flash": ["low", "medium", "high"],
+  "meituan/longcat-2.0": [],
   "meta/muse-spark-1.1": ["low", "medium", "high", "xhigh"],
   "meta/muse-spark-1.2": ["low", "medium", "high", "xhigh"],
   "meta/muse-spark-1.2-contributor": ["low", "medium", "high", "xhigh"],
   "meta/muse-spark-1.3": ["low", "medium", "high", "xhigh", "max"],
   "meta/muse-spark-1.3-contributor": ["low", "medium", "high", "xhigh"],
+  "meta/muse-spark-open": ["low", "medium", "high"],
+  "meta/muse-wonder-1.0": ["low", "medium", "high", "xhigh"],
+  "minimax/minimax-m3.1-flash": ["low", "medium", "high", "xhigh", "max"],
+  "minimax/minimax-m3.1-flash:free": ["low", "medium", "high", "xhigh", "max"],
+  "minimaxai/minimax-m2.5": [],
+  "minimaxai/minimax-m2.7": [],
+  "minimaxai/minimax-m3": ["low", "medium", "high"],
+  "mistral/mistral-large-4": ["low", "medium", "high"],
+  "moonshotai/kimi-k2.5": [],
+  "moonshotai/kimi-k2.6": [],
+  "moonshotai/kimi-k2.7-code": [],
+  "moonshotai/kimi-k2.7-code-highspeed": [],
+  "moonshotai/kimi-k3": ["low", "high", "max"],
+  "nvidia/nemotron-3-ultra-550b-a55b": [],
+  "nvidia/nemotron-3.5-super-vl": ["low", "medium", "high"],
+  "ornith/ornith-1.5-122b": [],
+  "ornith/ornith-1.5-122b:free": [],
+  "poolside/laguna-s-2.1-free": [],
+  "qwen/qwen3.6-max-preview": [],
+  "qwen/qwen3.6-plus": [],
+  "qwen/qwen3.7-flash": [],
+  "qwen/qwen3.7-max": [],
+  "qwen/qwen3.7-plus": [],
+  "qwen/qwen3.8-27b": ["low", "medium", "xhigh"],
+  "qwen/qwen3.8-flash": ["low", "medium", "xhigh"],
+  "qwen/qwen3.8-max": ["low", "medium", "xhigh"],
+  "qwen/qwen3.8-max-0902": ["low", "medium", "xhigh"],
+  "qwen/qwen3.8-max-prime": ["low", "medium", "xhigh"],
+  "qwen/qwen3.8-omni-flash": ["low", "medium", "xhigh"],
+  "reflection/beam:free": ["low", "medium", "high", "xhigh", "max"],
+  "sakana/fugu-ultra": ["high", "xhigh"],
+  "stealth/glyph-cluster:free": ["low", "medium", "high", "xhigh"],
+  "stepfun/step-3.5-flash": [],
+  "stepfun/step-3.7-flash": [],
+  "stepfun/step-5-preview": ["low", "medium", "high"],
+  "tencent/hy3-paid": [],
+  "tencent/hy4-preview": ["low", "medium", "high"],
+  "thinkingmachines/inkling": [],
+  "thinkingmachines/inkling-small": [],
+  "xai/grok-4.5": ["low", "medium", "high"],
+  "xai/grok-4.6": ["low", "medium", "high", "xhigh"],
+  "xai/grok-4.7": ["low", "medium", "high", "xhigh"],
+  "xiaomi/mimo-v2.5": [],
+  "xiaomi/mimo-v2.5-pro": [],
+  "xiaomi/mimo-v2.6-flash": [],
+  "xiaomi/mimo-v2.6-pro": [],
+  "xiaomi/mimo-v2.6-pro-ultraspeed": [],
+  "z-ai/glm-5.3-flash": ["low", "high", "max"],
+  "z-ai/glm-5.3-flashx": ["low", "high", "max"],
+  "zai-org/glm-5": [],
+  "zai-org/glm-5.1": [],
+  "zai-org/glm-5.2": ["high", "max"],
+  "zai-org/glm-5.2-fast": [],
+  "zai-org/glm-5.3": ["low", "high", "max"],
+  // typesafe/jev: no adjustable effort reported
 };
 
 const CMD_DEFAULT_EFFORT: Record<string, string> = {
   "meta/muse-spark-1.3-contributor": "xhigh",
 };
 
-function cmdEffortSetting(nativeId: string): ModelSetting {
+function cmdEffortSetting(nativeId: string): ModelSetting | null {
   const short = nativeId.includes("/") ? nativeId : `meta/${nativeId}`;
   const bare = short.split("/").pop() ?? short;
   const levels =
-    CMD_EFFORT_OPTIONS[short] ??
-    CMD_EFFORT_OPTIONS[bare] ??
-    Object.keys(CMD_EFFORT_LABELS).filter((level) => level !== "max");
+    CMD_EFFORT_OPTIONS[short] ?? CMD_EFFORT_OPTIONS[bare] ?? [];
+  if (levels.length === 0) return null;
   const options = levels.map((value) => ({
     value,
     label: CMD_EFFORT_LABELS[value] ?? value,
@@ -477,10 +731,32 @@ function cmdEffortSetting(nativeId: string): ModelSetting {
   };
 }
 
+const CMD_MODEL_ID = /^[A-Za-z0-9_.:+@-]+(?:\/[A-Za-z0-9_.:+@-]+)?$/;
+
+/**
+ * One model row in `cmd --list-models`: a native id followed by a
+ * space-padded description. Some providers use namespaced ids
+ * (`deepseek/deepseek-v4-flash`) and others use bare ids
+ * (`claude-sonnet-5-5`), so a bare id needs a description column to be
+ * distinguishable from a section header.
+ */
+function cmdModelIdFromListLine(line: string): string | null {
+  const first = line.split(/\s+/)[0] ?? "";
+  if (!CMD_MODEL_ID.test(first) || first.endsWith(":")) return null;
+  const namespaced = first.includes("/");
+  const hasDescription = /^\S+ {2,}\S/.test(line);
+  if (!namespaced && !hasDescription) return null;
+  // Headers and prose ("Pass the full id…") are never ids; every real bare
+  // model id carries a version number (claude-sonnet-5-5, gpt-6-astra).
+  if (!namespaced && !/\d/.test(first)) return null;
+  return first;
+}
+
 /**
  * Parse `cmd --list-models` text output. Lines look like:
  *   deepseek/deepseek-v4-flash   fast hybrid-attention reasoning (default)
- * Section headers and the "Available models · N models" banner are skipped.
+ *   claude-sonnet-5-5            best combo of speed & intelligence
+ * Section headers and the trailing decision-model section are skipped.
  */
 export function modelsFromCmdListOutput(stdout: string): AgentModel[] {
   const models: AgentModel[] = [];
@@ -489,17 +765,18 @@ export function modelsFromCmdListOutput(stdout: string): AgentModel[] {
     const line = rawLine.trim();
     if (!line) continue;
     if (/^available models/i.test(line)) continue;
-    const first = line.split(/\s+/)[0] ?? "";
-    if (!first.includes("/")) continue;
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\-+:]+$/.test(first)) continue;
-    if (seen.has(first)) continue;
+    // Decision models take structured JSON, not chat turns.
+    if (/^decision models/i.test(line)) break;
+    const first = cmdModelIdFromListLine(line);
+    if (!first || seen.has(first)) continue;
     seen.add(first);
+    const effort = cmdEffortSetting(first);
     models.push({
       id: `cmd:${first}`,
       harness: "cmd",
       name: prettyCmdModelName(first),
       nativeId: first,
-      settings: [cmdEffortSetting(first)],
+      ...(effort ? { settings: [effort] } : {}),
     });
   }
   return models;
@@ -509,8 +786,9 @@ export function modelsFromCmdListOutput(stdout: string): AgentModel[] {
 export function defaultModelFromCmdListOutput(stdout: string): string | null {
   for (const rawLine of stdout.split(/\r?\n/)) {
     const line = rawLine.trim();
-    const first = line.split(/\s+/)[0] ?? "";
-    if (first.includes("/") && /\(default\)/i.test(line)) return first;
+    if (!/\(default\)/i.test(line)) continue;
+    const first = cmdModelIdFromListLine(line);
+    if (first) return first;
   }
   return null;
 }
